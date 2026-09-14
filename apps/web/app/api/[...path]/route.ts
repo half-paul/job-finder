@@ -1,0 +1,223 @@
+import { and, desc, eq, sql } from "drizzle-orm";
+import { z } from "zod";
+import {
+  getDb,
+  profiles,
+  preferences,
+  resumes,
+  auditEvents,
+} from "@jobfinder/db";
+import { profileSchema, preferencesSchema } from "@jobfinder/shared";
+import {
+  authenticate,
+  logout,
+  rateLimit,
+  requireUser,
+} from "../../../lib/auth";
+import {
+  HttpError,
+  errorResponse,
+  readBody,
+  readJson,
+  verifyOrigin,
+} from "../../../lib/http";
+import { createSource, listSources, scanSource } from "../../../lib/discovery";
+import { createJob, getJob, listJobs, updateStatus } from "../../../lib/jobs";
+import { extractResume, maxResumeBytes } from "../../../lib/resumes";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+type Context = { params: Promise<{ path: string[] }> };
+async function handle(request: Request, context: Context) {
+  try {
+    const { path } = await context.params;
+    const route = path.join("/");
+    const method = request.method;
+    if (!["GET", "HEAD"].includes(method)) verifyOrigin(request);
+    if (route === "health" && method === "GET") {
+      await getDb().execute(sql`select 1`);
+      return Response.json({ status: "ok" });
+    }
+    if (
+      method === "POST" &&
+      (route === "auth/register" || route === "auth/login")
+    )
+      return Response.json(
+        await authenticate(await readJson(request), route.endsWith("register")),
+      );
+    if (method === "POST" && route === "auth/logout") {
+      await logout();
+      return Response.json({ ok: true });
+    }
+    const user = await requireUser();
+    const db = getDb();
+    if (route === "sources" && method === "GET")
+      return Response.json(await listSources(user.id));
+    if (route === "sources" && method === "POST") {
+      await rateLimit(`sources:${user.id}`, 20, 3600);
+      return Response.json(
+        await createSource(user.id, await readJson(request)),
+        {
+          status: 201,
+        },
+      );
+    }
+    if (path[0] === "sources" && path.length === 2) {
+      const id = z.uuid().parse(path[1]);
+      if (method === "POST" && path.length === 2)
+        return Response.json(await scanSource(user.id, id));
+    }
+    if (route === "profile") {
+      if (method === "GET") {
+        const [row] = await db
+          .select()
+          .from(profiles)
+          .where(eq(profiles.userId, user.id));
+        return Response.json(row.data);
+      }
+      if (method === "PUT") {
+        const data = profileSchema.parse(await readJson(request));
+        await db
+          .update(profiles)
+          .set({ data, updatedAt: new Date() })
+          .where(eq(profiles.userId, user.id));
+        return Response.json(data);
+      }
+    }
+    if (route === "preferences") {
+      if (method === "GET") {
+        const [row] = await db
+          .select()
+          .from(preferences)
+          .where(eq(preferences.userId, user.id));
+        return Response.json(row.data);
+      }
+      if (method === "PUT") {
+        const data = preferencesSchema.parse(await readJson(request));
+        await db
+          .update(preferences)
+          .set({ data, updatedAt: new Date() })
+          .where(eq(preferences.userId, user.id));
+        return Response.json(data);
+      }
+    }
+    if (route === "resumes" && method === "GET") {
+      const rows = await db
+        .select({
+          id: resumes.id,
+          filename: resumes.filename,
+          size: resumes.size,
+          createdAt: resumes.createdAt,
+        })
+        .from(resumes)
+        .where(eq(resumes.userId, user.id))
+        .orderBy(desc(resumes.createdAt));
+      return Response.json(rows);
+    }
+    if (route === "resumes" && method === "POST") {
+      await rateLimit(`upload:${user.id}`, 10, 3600);
+      const bytes = await readBody(request, maxResumeBytes + 16384);
+      const form = await new Request(request.url, {
+        method: "POST",
+        headers: { "content-type": request.headers.get("content-type") ?? "" },
+        body: bytes,
+      }).formData();
+      const file = form.get("file");
+      if (!(file instanceof File))
+        throw new HttpError(400, "Choose a resume file.");
+      const original = Buffer.from(await file.arrayBuffer());
+      const filename = file.name
+        .replace(/[\/\\\r\n\x00-\x1f]/g, "_")
+        .slice(0, 200);
+      const extracted = await extractResume(filename, original);
+      const result = await db.transaction(async (tx) => {
+        // Serialize per-user uploads to enforce the storage cap even with concurrent requests.
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${user.id}))`,
+        );
+        const [{ count }] = await tx
+          .select({ count: sql<number>`count(*)::int` })
+          .from(resumes)
+          .where(eq(resumes.userId, user.id));
+        if (count >= 10)
+          throw new HttpError(
+            400,
+            "You can store up to 10 resumes. Delete an older version first.",
+          );
+        const [row] = await tx
+          .insert(resumes)
+          .values({
+            userId: user.id,
+            filename,
+            mimeType: extracted.mimeType,
+            size: original.length,
+            originalBase64: original.toString("base64"),
+            extractedText: extracted.text,
+          })
+          .returning({
+            id: resumes.id,
+            filename: resumes.filename,
+            extractedText: resumes.extractedText,
+          });
+        await tx
+          .insert(auditEvents)
+          .values({ userId: user.id, action: "resume.uploaded" });
+        return row;
+      });
+      return Response.json(result, { status: 201 });
+    }
+    if (path[0] === "resumes" && path.length === 2) {
+      const id = z.uuid().parse(path[1]);
+      const [resume] = await db
+        .select()
+        .from(resumes)
+        .where(and(eq(resumes.id, id), eq(resumes.userId, user.id)));
+      if (!resume) throw new HttpError(404, "Resume not found.");
+      if (method === "GET")
+        return new Response(Buffer.from(resume.originalBase64, "base64"), {
+          headers: {
+            "Content-Type": resume.mimeType,
+            "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(resume.filename)}`,
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
+      if (method === "DELETE") {
+        await db
+          .delete(resumes)
+          .where(and(eq(resumes.id, id), eq(resumes.userId, user.id)));
+        return Response.json({ ok: true });
+      }
+    }
+    if (route === "jobs") {
+      if (method === "GET")
+        return Response.json(
+          await listJobs(user.id, new URL(request.url).searchParams),
+        );
+      if (method === "POST") {
+        await rateLimit(`jobs:${user.id}`, 60, 3600);
+        return Response.json(
+          await createJob(user.id, await readJson(request)),
+          { status: 201 },
+        );
+      }
+    }
+    if (path[0] === "jobs" && path.length >= 2) {
+      const id = z.uuid().parse(path[1]);
+      if (path.length === 2 && method === "GET")
+        return Response.json(await getJob(user.id, id));
+      if (path.length === 3 && path[2] === "status" && method === "PUT")
+        return Response.json(
+          await updateStatus(user.id, id, await readJson(request)),
+        );
+    }
+    throw new HttpError(404, "Endpoint not found.");
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+async function route(request: Request, context: Context) {
+  const response = await handle(request, context);
+  response.headers.set("Cache-Control", "no-store");
+  return response;
+}
+export { route as GET, route as POST, route as PUT, route as DELETE };

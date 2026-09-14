@@ -1,0 +1,8 @@
+node_modules
+**/.next
+package-lock.json
+**/drizzle/meta
+test-results
+playwright-report
+doc/AI Job Finder Web App - requirements.md
+AGENTS.md
