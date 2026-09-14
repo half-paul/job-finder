@@ -1,0 +1,11 @@
+{
+  "name": "@jobfinder/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=../../.env.local ../../node_modules/next/dist/bin/next dev",
+    "build": "next build --webpack",
+    "start": "node --env-file-if-exists=../../.env.local ../../node_modules/next/dist/bin/next start"
+  }
+}
