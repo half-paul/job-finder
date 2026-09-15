@@ -85,7 +85,8 @@ export function DiscoveryBoard({ sources }: { sources: SourceRow[] }) {
       <p className="muted">
         RemoteOK and Jobicy provide remote jobs across employers. Indeed is not
         connected. Greenhouse, Lever and Ashby require individual employer
-        boards and are not all-company search feeds.
+        boards and are not all-company search feeds. Scheduled refreshes and
+        each source&apos;s next run are managed on the Automation page.
       </p>
       <section className="panel opportunities">
         <div className="panel-heading">
@@ -138,6 +139,11 @@ export function DiscoveryBoard({ sources }: { sources: SourceRow[] }) {
                           ? lastRun.startedAt.toLocaleString("en-CA")
                           : "Not scanned"}
                       </span>
+                      <small className="cell-sub">
+                        {source.schedule === "Manual"
+                          ? "Manual sync only"
+                          : `${source.schedule} · next ${source.nextRunAt ? new Date(source.nextRunAt).toLocaleString("en-CA") : "run pending"}`}
+                      </small>
                     </td>
                     <td>
                       <span className="tag">{lastRun?.status ?? "Ready"}</span>

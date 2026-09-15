@@ -1,7 +1,10 @@
 import { z } from "zod";
 import { countryCodes } from "./countries";
+import { automationPreferenceShape } from "./automation";
 export * from "./countries";
+export * from "./errors";
 export * from "./keywords";
+export * from "./automation";
 
 const short = z.string().trim().max(200);
 const list = z.array(short.min(1)).max(100);
@@ -194,6 +197,7 @@ export const preferencesSchema = z
       .min(0)
       .max(100_000_000)
       .default(250_000),
+    ...automationPreferenceShape,
     weights: weightSchema,
   })
   .refine(
@@ -237,6 +241,11 @@ export const defaultPreferences: Preferences = {
     salary: false,
   },
   aiMonthlyBudgetMicros: 250_000,
+  notificationsEnabled: true,
+  notifyMinScore: 90,
+  digestEnabled: false,
+  digestMinScore: 85,
+  digestHourUtc: 13,
   weights: defaultWeights,
 };
 export const httpUrl = z

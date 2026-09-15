@@ -1,10 +1,9 @@
+import { AppError } from "@jobfinder/shared";
 import { ZodError } from "zod";
-export class HttpError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
-    super(message);
+export class HttpError extends AppError {
+  constructor(status: number, message: string) {
+    super(status, message);
+    this.name = "HttpError";
   }
 }
 export function origin() {
@@ -48,7 +47,7 @@ export async function readJson(request: Request) {
   }
 }
 export function errorResponse(error: unknown) {
-  if (error instanceof HttpError)
+  if (error instanceof AppError)
     return Response.json({ error: error.message }, { status: error.status });
   if (error instanceof ZodError)
     return Response.json(

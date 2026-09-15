@@ -27,7 +27,12 @@ import {
   verifyOrigin,
 } from "../../../lib/http";
 import { createSource, listSources, scanSource } from "../../../lib/discovery";
-import { evaluateJob, evaluateSyncedJobs } from "../../../lib/matching";
+import {
+  alertOnMatches,
+  evaluateJob,
+  evaluateSyncedJobs,
+} from "../../../lib/matching";
+import { alerts, automation, watchlist } from "../../../lib/automation";
 import {
   createJob,
   getJob,
@@ -64,9 +69,42 @@ async function handle(request: Request, context: Context) {
     const db = getDb();
     if (route === "jobs/evaluation-batch" && method === "POST") {
       await rateLimit(`ai-batch:${user.id}`, 20, 3600);
+      const result = await evaluateSyncedJobs(user.id, await readJson(request));
+      const alertsCreated = result.evaluated
+        ? await alertOnMatches(user.id)
+        : 0;
+      return Response.json({ ...result, alertsCreated });
+    }
+    if (route === "automation" && method === "GET")
+      return Response.json(await automation.overview(user.id));
+    if (route === "automation/digest" && method === "POST") {
+      await rateLimit(`digest:${user.id}`, 10, 3600);
       return Response.json(
-        await evaluateSyncedJobs(user.id, await readJson(request)),
+        await automation.digest(user.id, await readJson(request)),
       );
+    }
+    if (route === "notifications" && method === "GET")
+      return Response.json(await alerts.list(user.id));
+    if (route === "notifications/mark" && method === "POST")
+      return Response.json(await alerts.mark(user.id, await readJson(request)));
+    if (route === "watchlist") {
+      if (method === "GET") return Response.json(await watchlist.list(user.id));
+      if (method === "POST") {
+        await rateLimit(`watchlist:${user.id}`, 60, 3600);
+        return Response.json(
+          await watchlist.create(user.id, await readJson(request)),
+          { status: 201 },
+        );
+      }
+    }
+    if (path[0] === "watchlist" && path.length === 2) {
+      const id = z.uuid().parse(path[1]);
+      if (method === "PUT")
+        return Response.json(
+          await watchlist.update(user.id, id, await readJson(request)),
+        );
+      if (method === "DELETE")
+        return Response.json(await watchlist.remove(user.id, id));
     }
     if (route === "sources" && method === "GET")
       return Response.json(await listSources(user.id));
@@ -83,6 +121,17 @@ async function handle(request: Request, context: Context) {
       const id = z.uuid().parse(path[1]);
       if (method === "POST" && path.length === 2)
         return Response.json(await scanSource(user.id, id));
+    }
+    if (
+      path[0] === "sources" &&
+      path.length === 3 &&
+      path[2] === "schedule" &&
+      method === "PUT"
+    ) {
+      const id = z.uuid().parse(path[1]);
+      return Response.json(
+        await automation.scheduleSource(user.id, id, await readJson(request)),
+      );
     }
     if (route === "profile") {
       if (method === "GET") {
@@ -237,7 +286,9 @@ async function handle(request: Request, context: Context) {
         return Response.json(await getJob(user.id, id));
       if (path.length === 3 && path[2] === "evaluate" && method === "POST") {
         await rateLimit(`ai-evaluate:${user.id}`, 20, 3600);
-        return Response.json(await evaluateJob(user.id, id));
+        const result = await evaluateJob(user.id, id);
+        if (result.match) await alertOnMatches(user.id);
+        return Response.json(result);
       }
       if (path.length === 3 && path[2] === "status" && method === "PUT")
         return Response.json(

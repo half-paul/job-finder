@@ -1,8 +1,8 @@
 # JobFinder AI
 
-A private career workspace for collecting opportunities and defining what your next role should look like. See the [requirements](doc/AI%20Job%20Finder%20Web%20App%20-%20requirements.md), [architecture and phased plan](doc/architecture.md), [Phase 2 validation](doc/phase-2-validation.md), [Phase 3 validation](doc/phase-3-validation.md), and [keyword filters and archiving](doc/keyword-filters-and-archiving.md).
+A private career workspace for collecting opportunities and defining what your next role should look like. See the [requirements](doc/AI%20Job%20Finder%20Web%20App%20-%20requirements.md), [architecture and phased plan](doc/architecture.md), [Phase 2 validation](doc/phase-2-validation.md), [Phase 3 validation](doc/phase-3-validation.md), [Phase 4 validation](doc/phase-4-validation.md), and [keyword filters and archiving](doc/keyword-filters-and-archiving.md).
 
-## Implemented: Phase 1 foundation + Phase 2 discovery + Phase 3 matching
+## Implemented: Phase 1 foundation + Phase 2 discovery + Phase 3 matching + Phase 4 automation
 
 - Next.js App Router, React, strict TypeScript, Tailwind and accessible Radix/variant-based UI primitives.
 - PostgreSQL 16 with pgvector, Drizzle schema and checked-in migrations.
@@ -26,8 +26,15 @@ A private career workspace for collecting opportunities and defining what your n
 - Keyword gates on Preferences decide what discovery may import at all: a listing must mention at least one required keyword, a blocking keyword always wins, an empty required list imports everything, and manual entries are never filtered.
 - Archiving removes an opportunity from every count, list and automatic evaluation while keeping its canonical identity, so a later sync re-uses the archived row instead of importing that posting again. Archive and restore are available from the list, the archive view and the detail page.
 - After a sync, the portal automatically evaluates up to the configured number of eligible new or changed jobs (default 5) and reports the batch result.
+- `apps/worker` runs pg-boss in the database we already operate — no Redis. It owns every scheduled scan, scheduled evaluation, alert write, digest and cleanup pass, publishes no ports, and writes a heartbeat the Automation page reads.
+- Per-source schedules (Manual, Hourly, Every 4 hours, Twice daily, Daily) are aligned to UTC boundaries. A restart or a duplicated scheduler tick cannot enqueue the same slot twice, a missed slot collapses into one run, and a retried scan reuses the same run row instead of creating a second one.
+- Company watchlists with priorities. A watchlist entry that names a Greenhouse, Lever or Ashby board owns the employer source the worker scans directly, so that company is checked even when it never appears on a public feed; removing the entry disables the source and keeps its provenance.
+- Opt-in in-app alerts when an evaluated match reaches your alert score, deduped per evaluation so nothing is repeated. Nothing is emailed, messaged or pushed; the alert list and unread bell live inside the workspace.
+- An opt-in daily digest for a chosen UTC hour, with deterministic counts, ordering and highlights. Generating it on demand is additive, and its narrative sentence is the only model call.
+- Automation diagnostics: worker heartbeat and queue depth, each source's schedule, next run and last result, and the recorded search history with duration and counters — plus a clear "Not running" state when the worker is stopped.
+- Hourly housekeeping removes expired sessions, expired rate-limit buckets and read notifications older than 90 days.
 
-Discovery is user-triggered and feeds each provider's current listings; automatic evaluation then runs one bounded batch. Scheduled searches, notifications and application-writing assistance are **not implemented yet**. The app does not submit applications. Indeed has no supported public job API and is not connected. No sample jobs or shared-password accounts are installed. The profile editor can load an explicitly labeled fictional executive example into the form for review.
+Discovery is both user-triggered and scheduled. A manual sync scans the global feeds in the request path with visible progress; scheduled scans, evaluation, alerts, digests and cleanup run only in the worker. Application-writing assistance and outbound notification channels (email, push, Slack, SMS) are **not implemented yet**. The app does not submit applications. Indeed has no supported public job API and is not connected. No sample jobs or shared-password accounts are installed, and no alert, digest or scan result is fabricated while the worker is stopped. The profile editor can load an explicitly labeled fictional executive example into the form for review.
 
 Scans have a 5,000-job safety cap. A capped or cursor-incomplete scan is recorded as **Partial** and never marks older listings removed.
 
@@ -46,9 +53,14 @@ docker compose stop     # stop, retaining data
 docker compose up -d    # restart
 ```
 
-The web container optionally reads ignored `.env.local` for AI models/key and the JSON-LD allowlist. Compose overrides `DATABASE_URL` and `APP_ORIGIN` with its local container settings. After changing `.env.local`, run `docker compose up -d --force-recreate web`. The environment file is excluded from image builds.
+The `web` container optionally reads ignored `.env.local` for AI models/key and the JSON-LD allowlist. Compose overrides `DATABASE_URL` and `APP_ORIGIN` with its local container settings. After changing `.env.local`, run `docker compose up -d --force-recreate web`. The environment file is excluded from image builds.
 
-No Redis or idle worker is included. The planned pg-boss worker arrives with background discovery.
+The `worker` service runs the same image with `npm run worker`. It publishes no ports, depends on the migration service, restarts unless stopped, and is the only place scheduled scans, scheduled evaluation, alerts, the daily digest and cleanup run. Stop it with `docker compose stop worker` if you want to confirm the Automation page reports "Not running" while nothing runs in the background. No Redis is needed: pg-boss keeps its queues in the same PostgreSQL database.
+
+```sh
+docker compose logs -f worker   # follow scheduled scan and digest activity
+docker compose restart worker   # pick up new code or configuration
+```
 
 ## Develop on the host
 
@@ -60,25 +72,27 @@ cp .env.example .env.local
 docker compose up -d postgres
 npm run db:migrate
 npm run dev
+npm run worker   # second terminal: scheduled scans, alerts, digest, cleanup
 ```
 
-Do not overwrite an existing `.env.local`; add only missing configuration. Root `.env.local` is loaded by development, start and migration commands and ignored by Git/Docker. `DATABASE_URL` is required; `APP_ORIGIN` must exactly match the browser origin for writes. The default is `http://localhost:3000`, not `127.0.0.1`. Secure cookies are enabled for HTTPS origins. `OPENAI_API_KEY` is required only for AI evaluation; the rest of the workspace runs without it. Agent shell operations must prefix commands with `rtk proxy`, per `AGENTS.md`.
+Do not overwrite an existing `.env.local`; add only missing configuration. Root `.env.local` is loaded by development, start, worker and migration commands and ignored by Git/Docker. `DATABASE_URL` is required; `APP_ORIGIN` must exactly match the browser origin for writes. The default is `http://localhost:3000`, not `127.0.0.1`. Secure cookies are enabled for HTTPS origins. `OPENAI_API_KEY` is required only for AI evaluation and the digest narrative; the rest of the workspace runs without it, and a scheduled evaluation without a key records a failure instead of a score. Agent shell operations must prefix commands with `rtk proxy`, per `AGENTS.md`.
 
 ## Commands and verification
 
-| Command                                   | Purpose                                                |
-| ----------------------------------------- | ------------------------------------------------------ |
-| `npm run dev`                             | Development server with reload                         |
-| `npm run lint`                            | ESLint, including explicit-any prohibition             |
-| `npm run typecheck`                       | Strict TypeScript across apps/packages/tests           |
-| `npm run format` / `npm run format:check` | Prettier write/check                                   |
-| `npm test`                                | Deterministic unit tests; no network/database required |
-| `npm run db:generate`                     | Generate migration from schema changes                 |
-| `npm run db:migrate`                      | Apply migrations and enable pgvector                   |
-| `npm run build` / `npm start`             | Production build/start                                 |
-| `npm exec playwright install chromium`    | Install browser test runtime                           |
-| `npm run test:e2e`                        | Real PostgreSQL/API and browser integration suite      |
-| `npm audit --audit-level=moderate`        | Dependency vulnerability check                         |
+| Command                                   | Purpose                                                              |
+| ----------------------------------------- | -------------------------------------------------------------------- |
+| `npm run dev`                             | Development server with reload                                       |
+| `npm run lint`                            | ESLint, including explicit-any prohibition                           |
+| `npm run typecheck`                       | Strict TypeScript across apps/packages/tests                         |
+| `npm run format` / `npm run format:check` | Prettier write/check                                                 |
+| `npm test`                                | Deterministic unit tests; no network/database required               |
+| `npm run db:generate`                     | Generate migration from schema changes                               |
+| `npm run db:migrate`                      | Apply migrations and enable pgvector                                 |
+| `npm run worker`                          | pg-boss worker: scheduled scans, evaluation, alerts, digest, cleanup |
+| `npm run build` / `npm start`             | Production build/start                                               |
+| `npm exec playwright install chromium`    | Install browser test runtime                                         |
+| `npm run test:e2e`                        | Real PostgreSQL/API and browser integration suite                    |
+| `npm audit --audit-level=moderate`        | Dependency vulnerability check                                       |
 
 ### Discovery configuration
 
@@ -86,7 +100,19 @@ Open **Discovery** and add **RemoteOK** or **Jobicy**. Both read their provider'
 
 Click **Sync jobs** in the portal header to scan all enabled global feeds, or use **Sync source** beside one in Discovery. The portal scans feeds sequentially, continues after provider failures, refreshes results, and shows progress, import counts, partial results and source messages. The latest scan is shown even when it failed. Concurrent scans in the same workspace are rejected to avoid duplicate imports.
 
-Keep the tab open until the sync finishes; you can navigate within the workspace while it runs. Each source runs synchronously, so large boards can take time. Reloading or closing the tab stops dispatching further sources and may interrupt the current scan; resumable background scans arrive with Phase 4.
+Keep the tab open until the sync finishes; you can navigate within the workspace while it runs. Each source runs synchronously in the request path, so large boards can take time and closing the tab may interrupt the current scan. Use a schedule instead when you want the worker to refresh a source without you watching it.
+
+### Scheduling, watchlists, alerts and the digest
+
+Set each source's refresh schedule on the **Automation** page, or by adding a company to the **Watchlist** with a Greenhouse, Lever or Ashby board and choosing a schedule there. Schedules are Manual, Hourly, Every 4 hours, Twice daily or Daily, and they run on aligned UTC boundaries: a restart cannot double-run a slot, and a slot missed while the worker was down collapses into one run. The Automation page shows each source's next run, its last result and the recorded search history, and reports "Not running" when no recent worker heartbeat exists.
+
+**Watchlist** entries carry your own priority (Dream Company, High Priority, Interesting, Neutral, Avoid). An entry that names a supported board owns the employer source the worker scans on its schedule, so that company is checked directly even when it never appears on a public feed. Removing an entry disables that source rather than deleting its provenance.
+
+**Alerts** are opt-in in Preferences: choose an alert score and an evaluated match at or above it creates one in-app alert, deduped per evaluation so re-reading or re-running never repeats it. The unread bell in the header opens **Notifications**, where you can mark one or all as read. **Nothing is emailed, messaged or pushed.**
+
+The **daily digest** is also opt-in and runs during a UTC hour you choose, or on demand from the Automation page. Its counts, ordering and highlights are computed deterministically from stored scores; only the summary sentence is a model call, and the digest still generates with deterministic text when OpenAI is unavailable. A digest is stored as an in-app notification with one record per UTC hour.
+
+Housekeeping runs hourly in the worker and removes expired sessions, expired rate-limit buckets and read notifications older than 90 days. To see exactly what the worker did, follow its structured logs: `npm run worker` on the host or `docker compose logs -f worker` in Compose.
 
 ### Keyword filters and archiving
 
@@ -102,11 +128,11 @@ For the decisions, observed live-feed results and known limitations, see [keywor
 
 Set `OPENAI_API_KEY` in ignored `.env.local`. `OPENAI_EMBEDDING_MODEL` defaults to `text-embedding-3-small`; `OPENAI_EXPLANATION_MODEL` defaults to `gpt-5.4-mini`. Open a job, choose **Evaluate match**, or let the portal evaluate a batch after each sync. Preferences control that batch: automatic evaluation can be turned off, the limit defaults to 5 jobs and accepts 1-20, and each sync evaluates at most that many eligible new or changed jobs one at a time. The evaluator receives only profile/preferences/listing evidence, has no tools, and cannot submit applications. Hard requirements — including your selected countries — are checked first and no score is persisted when OpenAI is unavailable or returns invalid JSON. The default monthly budget is USD 0.25; change it in Preferences. This is an estimate check, not a billing cap: it sums the latest successful evaluation per job, so re-evaluations overwrite previous usage, failed requests can incur unrecorded charges, and concurrent requests do not reserve budget. Prices are fixed to the default models; model overrides do not adjust prices or embedding dimensions. An append-only usage ledger and atomic reservations remain follow-up work.
 
-For the full command matrix, observed results, opt-in live tests and limitations, see [Phase 3 validation](doc/phase-3-validation.md).
+For the full command matrix, observed results, opt-in live tests and limitations, see [Phase 3 validation](doc/phase-3-validation.md) and [Phase 4 validation](doc/phase-4-validation.md).
 
 For integration/E2E tests, start PostgreSQL, migrate and build first. Playwright starts the production server unless one is already running at localhost:3000. Stop Compose web (`docker compose stop web`) before testing a host build to avoid silently testing an older container. Tests create unique `@example.test` accounts and synthetic jobs/resumes; use a disposable test database if you do not want those records in your development database. `DATABASE_URL` selects the test database; the app must use the same URL. For custom configuration, load it into the test process with `node --env-file=.env.local node_modules/@playwright/test/cli.js test`; plain `npm run test:e2e` only loads that file in the host web server. Snapshots/traces go into ignored `test-results/`.
 
-Unit tests cover password verification, exact origin checks, bounded bodies, canonical URLs, weight validation, keyword import gates, qualification/interest scoring, hard filters, strict AI schemas, OpenAI response validation and cost estimation, and real TXT/PDF/DOCX parsing including malformed/oversized/compressed input. API/database tests verify hashed credentials/sessions, revocation, rate limits, foreign keys, pgvector, hard-filter precedence, archiving scope and source ownership. Browser tests verify profile/preferences, resume ownership, private jobs, saved-state/history, archive and restore counts, filtering, mobile overflow, theme and sign-in/out.
+Unit tests cover password verification, exact origin checks, bounded bodies, canonical URLs, weight validation, keyword import gates, qualification/interest scoring, hard filters, strict AI schemas, OpenAI response validation and cost estimation, UTC schedule alignment, recommendation bands, watchlist keys, alert dedupe identity and preference defaults, and real TXT/PDF/DOCX parsing including malformed/oversized/compressed input. API/database tests verify hashed credentials/sessions, revocation, rate limits, foreign keys, pgvector, hard-filter precedence, archiving scope, source ownership, watchlist scoping, worker scan idempotency, alert and digest idempotency, source schedules and expired-row cleanup. Browser tests verify profile/preferences, resume ownership, private jobs, saved-state/history, archive and restore counts, filtering, mobile overflow, theme and sign-in/out.
 
 GitHub Actions runs formatting, lint, types, unit tests, migrations, dependency scanning, build, database/browser tests and container build. Deployment is deferred until an environment is configured.
 
@@ -114,6 +140,8 @@ GitHub Actions runs formatting, lint, types, unit tests, migrations, dependency 
 
 ```text
 apps/web/              UI, authenticated routes, application services
+apps/worker/           pg-boss worker: scheduled scans, evaluation, alerts, digest, cleanup
+packages/automation/   Scan/evaluation/watchlist/alert/digest services shared by web and worker
 packages/db/           Drizzle schema, generated SQL, migration runner
 packages/shared/       Zod contracts and editable defaults
 packages/job-sources/  Official ATS/feed adapters and bounded transport
@@ -125,7 +153,7 @@ doc/                   Requirements, architecture and phased plan
 
 ## Local foundation limitations
 
-Before a public deployment: verified email/password recovery or external identity/MFA, trusted-proxy-aware edge throttling, HTTPS, least-privilege DB roles, private encrypted storage/backups, retention/export/deletion policy, isolated parsing with CPU/memory limits, and a security review. Local resumes are access-controlled database records, not application-encrypted documents. The app-wide auth throttle limits expensive hashing but can affect other users. Expired sessions/rate-limit entries need scheduled cleanup in Phase 4.
+Before a public deployment: verified email/password recovery or external identity/MFA, trusted-proxy-aware edge throttling, HTTPS, least-privilege DB roles, private encrypted storage/backups, retention/export/deletion policy, isolated parsing with CPU/memory limits, and a security review. Local resumes are access-controlled database records, not application-encrypted documents. The app-wide auth throttle limits expensive hashing but can affect other users. Scheduled cleanup of expired sessions and rate-limit entries runs hourly in the worker, so it only happens while the worker is running. Scheduled work is not clustered: one worker per database is the supported local deployment.
 
 Manual jobs belong to their author; future approved connector jobs may be shared. Descriptions are escaped text, never trusted HTML. Unknown salary/seniority/location stay unknown; score filtering excludes unevaluated jobs. Hard preferences block evaluation but do not hide the listing. Timeline/count dates use UTC. The theme toggle applies to the current browser document.
 
