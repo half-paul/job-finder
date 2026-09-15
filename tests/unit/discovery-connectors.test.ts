@@ -114,3 +114,143 @@ describe("Phase 5 posting links and JSON-LD careers connector", () => {
     expect(providerName("browser")).toBe("Browser");
   });
 });
+
+import {
+  createHttpCrawlerClient,
+  crawlerClientFromEnv,
+  type CrawlerClient,
+} from "@jobfinder/job-sources";
+
+const fakeCrawler = (
+  jobs: Array<{
+    title: string;
+    url: string;
+    id?: string;
+    location?: string;
+    description?: string;
+  }>,
+  complete = true,
+): CrawlerClient => ({
+  crawl: async () => ({
+    jobs: jobs.map((j) => ({
+      location: "",
+      description: "",
+      postedAt: null,
+      ...j,
+    })),
+    complete,
+    warnings: [],
+  }),
+  capture: async () => ({ patterns: [], warnings: [] }),
+});
+
+describe("Phase 5 crawler client and Browser connector", () => {
+  it("sends the bearer secret and validates the response", async () => {
+    let auth = "";
+    const client = createHttpCrawlerClient({
+      url: "http://crawler:4000",
+      secret: "s3cret",
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        auth = new Headers(init?.headers).get("authorization") ?? "";
+        expect(String(input)).toBe("http://crawler:4000/crawl");
+        return new Response(
+          JSON.stringify({ jobs: [], complete: true, warnings: [] }),
+        );
+      }) as typeof fetch,
+    });
+    await client.crawl({
+      url: "https://acme.example/careers",
+      maxPages: 1,
+      maxJobs: 1,
+    });
+    expect(auth).toBe("Bearer s3cret");
+    const bad = createHttpCrawlerClient({
+      url: "http://crawler:4000",
+      secret: "s",
+      fetchImpl: (async () =>
+        new Response(JSON.stringify({ nope: 1 }))) as typeof fetch,
+    });
+    await expect(
+      bad.crawl({ url: "https://a.example/", maxPages: 1, maxJobs: 1 }),
+    ).rejects.toThrow(/invalid/i);
+    const refused = createHttpCrawlerClient({
+      url: "http://crawler:4000",
+      secret: "s",
+      fetchImpl: (async () =>
+        new Response(JSON.stringify({ error: "robots", kind: "blocked" }), {
+          status: 422,
+        })) as typeof fetch,
+    });
+    await expect(
+      refused.crawl({ url: "https://a.example/", maxPages: 1, maxJobs: 1 }),
+    ).rejects.toMatchObject({ kind: "blocked" });
+  });
+
+  it("is null without configuration", () => {
+    expect(crawlerClientFromEnv({})).toBeNull();
+    expect(
+      crawlerClientFromEnv({
+        CRAWLER_URL: "http://c:4000",
+        CRAWLER_SECRET: "x",
+      }),
+    ).not.toBeNull();
+  });
+
+  it("turns crawled postings into normalized jobs and flags incomplete walks", async () => {
+    const connector = createConnector("Browser", {
+      crawlerClient: fakeCrawler(
+        [
+          {
+            title: "Head of Growth",
+            url: "https://acme.example/jobs/9",
+            id: "9",
+            location: "Remote - Canada",
+            description: "Own growth across the funnel and lead a small team.",
+          },
+          { title: "Ops Lead", url: "https://acme.example/jobs/10" },
+        ],
+        false,
+      ),
+    });
+    const query = {
+      board: "acme.example",
+      terms: [],
+      company: "Acme",
+      sourceUrl: "https://acme.example/careers",
+    };
+    const page = await connector.search(query);
+    expect(page.complete).toBe(false);
+    expect(page.jobs.map((j) => j.externalId)).toEqual([
+      "9",
+      "https://acme.example/jobs/10",
+    ]);
+    const first = await connector.normalize(
+      await connector.fetchJob(page.jobs[0]),
+      { query },
+    );
+    expect(first).toMatchObject({
+      provider: "Browser",
+      workType: "Remote",
+      company: "Acme",
+      title: "Head of Growth",
+    });
+    const second = await connector.normalize(
+      await connector.fetchJob(page.jobs[1]),
+      { query },
+    );
+    expect(second.description).toContain("No description was captured");
+  });
+
+  it("fails loudly when the crawler is not configured", async () => {
+    const connector = createConnector("Browser", { crawlerClient: null });
+    await expect(
+      connector.search({
+        board: "a",
+        terms: [],
+        sourceUrl: "https://a.example/careers",
+      }),
+    ).rejects.toThrow(
+      "Browser crawling is not configured; start the crawler service",
+    );
+  });
+});

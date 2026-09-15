@@ -7,6 +7,11 @@ import {
   SourceHttpError,
   type TransportOptions,
 } from "./transport";
+import {
+  createHttpCrawlerClient,
+  crawlerClientFromEnv,
+  type CrawlerClient,
+} from "./crawler-client";
 
 export * from "./transport";
 
@@ -76,6 +81,7 @@ export interface SourceConnector<RawJob = unknown> {
 
 export interface ConnectorOptions extends TransportOptions {
   jsonLdAllowedHosts?: string[];
+  crawlerClient?: CrawlerClient | null;
 }
 
 export const descriptionDigest = (value: string) =>
@@ -181,12 +187,13 @@ export function createConnector(
     case "CapturedApi":
       throw new Error("Not implemented");
     case "Browser":
-      throw new Error("Not implemented");
+      return createBrowserConnector(options);
   }
 }
 
 import {
   createAshbyConnector,
+  createBrowserConnector,
   createCareersConnector,
   createGreenhouseConnector,
   createJsonLdConnector,
@@ -197,12 +204,15 @@ import {
 
 export {
   createAshbyConnector,
+  createBrowserConnector,
   createCareersConnector,
   createGreenhouseConnector,
   createJsonLdConnector,
   createLeverConnector,
   createRemoteOkConnector,
   createJobicyConnector,
+  createHttpCrawlerClient,
+  crawlerClientFromEnv,
 };
 export * from "./posting-links";
 export {

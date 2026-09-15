@@ -5,3 +5,4 @@ export { createJsonLdConnector } from "./json-ld";
 export { createLeverConnector } from "./lever";
 export { createRemoteOkConnector } from "./remote-ok";
 export { createJobicyConnector } from "./jobicy";
+export { createBrowserConnector } from "./browser";
