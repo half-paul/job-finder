@@ -13,7 +13,13 @@ import {
   vector,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import type { Profile, Preferences, JobMatch } from "@jobfinder/shared";
+import type {
+  Profile,
+  Preferences,
+  JobMatch,
+  PolicyCheck,
+  PatternFieldMap,
+} from "@jobfinder/shared";
 const createdAt = () =>
   timestamp("created_at", { withTimezone: true }).defaultNow().notNull();
 export const users = pgTable("users", {
@@ -314,6 +320,73 @@ export const companyWatchlists = pgTable(
     uniqueIndex("watchlist_owner_company_unique").on(t.userId, t.companyKey),
     index("watchlist_owner_idx").on(t.userId),
   ],
+);
+
+/**
+ * A company the user asked us to import. The worker resolves each candidate
+ * once into a strategy and a `job_sources` row; it is not re-resolved until
+ * its source fails repeatedly or the user presses Retry.
+ */
+export const companyCandidates = pgTable(
+  "company_candidates",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    watchlistId: uuid("watchlist_id").references(() => companyWatchlists.id, {
+      onDelete: "set null",
+    }),
+    name: text().notNull(),
+    /** Registrable domain, lowercase. One candidate per domain per user. */
+    domain: text().notNull(),
+    origin: text().notNull().default("seed"),
+    status: text().notNull().default("Pending"),
+    careersUrl: text("careers_url"),
+    ats: text(),
+    atsKey: text("ats_key"),
+    strategy: text().notNull().default("none"),
+    sourceId: uuid("source_id").references(() => jobSources.id, {
+      onDelete: "set null",
+    }),
+    policyCheck: jsonb("policy_check").$type<PolicyCheck>(),
+    error: text().notNull().default(""),
+    attempts: integer().notNull().default(0),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    nextCheckAt: timestamp("next_check_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (t) => [
+    uniqueIndex("candidate_owner_domain_unique").on(t.userId, t.domain),
+    index("candidate_status_next_idx").on(t.status, t.nextCheckAt),
+  ],
+);
+
+/** A JSON request the crawler saw a careers page make; refreshes replay it. */
+export const crawlPatterns = pgTable(
+  "crawl_patterns",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => jobSources.id, { onDelete: "cascade" }),
+    kind: text().notNull().default("http-json"),
+    urlTemplate: text("url_template").notNull(),
+    method: text().notNull().default("GET"),
+    headers: jsonb().$type<Record<string, string>>().notNull().default({}),
+    body: text(),
+    jobsPath: text("jobs_path").notNull(),
+    fieldMap: jsonb("field_map").$type<PatternFieldMap>().notNull(),
+    discoveredAt: timestamp("discovered_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }),
+    failures: integer().notNull().default(0),
+  },
+  (t) => [uniqueIndex("crawl_pattern_source_unique").on(t.sourceId)],
 );
 
 export const notifications = pgTable(
