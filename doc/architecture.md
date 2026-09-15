@@ -1,17 +1,23 @@
 # JobFinder AI — architecture and delivery plan
 
-Status: Phase 1 + Phase 2 + Phase 3 implementation, plus keyword import gates and listing archiving. The requirements document remains the product specification. This design deliberately leaves automation to its specified phase; an empty database must never imply invented job listings or AI scores.
+Status: Phase 1 + Phase 2 + Phase 3 + Phase 4 implementation, plus keyword import gates and listing archiving. The requirements document remains the product specification. An empty database must never imply invented job listings or AI scores, and no alert, digest or scan result is fabricated while the worker is stopped.
 
 ## Architecture
 
-Use a TypeScript workspace with Next.js App Router for UI and authenticated HTTP APIs, Drizzle for PostgreSQL 16, and pgvector for Phase 3 embeddings. A separate Node worker will use pg-boss in Phase 4: durable jobs, retries, and scheduling in the database we already operate, without adding Redis. Keep provider, matching, and shared contracts independent of Next.js. Use Docker Compose for local deployment; defer AWS infrastructure.
+Use a TypeScript workspace with Next.js App Router for UI and authenticated HTTP APIs, Drizzle for PostgreSQL 16, and pgvector for Phase 3 embeddings. A separate Node worker uses pg-boss for durable jobs, retries and scheduling in the database we already operate, without adding Redis. The web app and the worker share one service package (`packages/automation`); provider, matching and shared contracts stay independent of Next.js. Use Docker Compose for local deployment; defer AWS infrastructure.
 
 ```mermaid
 flowchart TD
   Browser[Browser: executive dashboard] --> Web[Next.js: authentication and APIs]
   Web --> DB[(PostgreSQL 16 + pgvector)]
   Web --> Documents[Private resume records]
-  Worker[Node worker: pg-boss, Phase 4] --> DB
+  Worker[Node worker: pg-boss] --> Sources
+  Worker --> Evaluation
+  Worker --> Alerts[Opt-in alerts and daily digest]
+  Worker --> Maintenance[Cleanup and diagnostics]
+  Worker --> DB
+  Maintenance --> DB
+  Alerts --> DB
   Worker --> Discovery[Company discovery and career URL finder, Phase 5]
   Discovery --> Detector[ATS detector: Greenhouse, Lever, Ashby, Workday, SmartRecruiters, custom]
   Detector --> Sources[Permitted ATS APIs and feeds, Phase 2]
@@ -24,7 +30,7 @@ flowchart TD
   Filter --> Embeddings[Embedding retrieval, Phase 3]
   Embeddings --> Evaluation[Bounded LLM evaluation]
   Evaluation --> DB
-  DB --> Alerts[Opt-in alerts and digest, Phase 4]
+  DB --> Alerts
 ```
 
 ### Repository boundaries
@@ -34,8 +40,10 @@ flowchart TD
 - `packages/shared`: Zod input schemas, profile/preferences and job contracts.
 - `packages/job-sources`: source connector contract; multi-employer RemoteOK and Jobicy feeds plus employer-specific Greenhouse, Lever, Ashby and allowlisted JSON-LD adapters.
 - `packages/matching`: deterministic filters/aggregation, embedding client/cache contracts and structured AI evaluation.
+- `packages/automation`: the server-side service layer shared by the web app and the worker — the source scan engine, the bounded evaluation batch, watchlists, alerts, the daily digest, schedule math, expired-row cleanup and automation diagnostics. It imports no Next.js code, so `apps/worker` reuses it unchanged.
 - `packages/discovery` (Phase 5): company discovery, career URL finder, ATS detector, structured location normalizer and the discovery transport. Depends on `packages/job-sources` for connectors; never the reverse.
-- `apps/worker` and `packages/ai`: reserved for the actual worker and AI implementation, not empty running services.
+- `apps/worker`: the pg-boss process that owns scheduled scans, scheduled evaluation, alert creation, the daily digest and cleanup. It publishes no ports, and it is the only process that runs scheduled network work.
+- `packages/ai`: reserved for later AI implementation, not an empty running service.
 - `tests`: unit and real PostgreSQL/API/E2E verification. `doc`: decisions and plans.
 
 ## PostgreSQL schema
@@ -54,36 +62,48 @@ Use UUID primary keys and timezone-aware timestamps. Private records always carr
 | company_candidates | id, name, domain, origin (seed list, search, referral), status, created_at; Phase 5 input queue for career URL discovery                           |
 | crawl_patterns     | id, company_id, kind (ats, json-ld, http-json, browser), url_template, request JSONB, discovered_at, last_verified_at; saved API patterns, Phase 5 |
 | job_locations      | id, job_id, raw text, country, region, city, remote, applicant_countries[], confidence, evidence; Phase 5 structured location per posting          |
-| job_sources        | id, provider, unique provider/board identity, enabled, source URL                                                                                  |
+| job_sources        | id, owner_id, provider, unique owner/board identity, enabled, source URL, schedule, next_run_at, last_checked_at                                   |
 | jobs               | id, company_id, title, description, employment/seniority/location, compensation, canonical URL/hash, lifecycle dates, archived_at and status       |
 | job_references     | job_id + source_id + external_id; retain all provenance for deduplicated listings                                                                  |
 | job_matches        | user_id + job_id PK, qualification/interest/overall scores, confidence, versioned explanation JSONB, evaluated_at                                  |
 | saved_jobs         | user_id + job_id PK, action/status, notes, updated_at                                                                                              |
 | job_status_history | id, user_id, job_id, action, created_at; append on every user action                                                                               |
 | audit_events       | id, user_id, action, created_at; exclude sensitive payloads                                                                                        |
+| search_runs        | id, source_id, user_id, status, trigger (Manual/Schedule), counters, warnings, error, duration_ms; the search history the diagnostics view reads   |
+| company_watchlists | id, user_id, company + normalized company_key (unique per user), domain, provider/board, priority, notes, source_id; Phase 4 watchlist entries     |
+| notifications      | id, user_id, optional job_id, kind (Match/Digest/System), title, body, score, unique user/dedupe_key, read_at, created_at                          |
+| automation_state   | key PK, JSONB value, updated_at; worker heartbeat and the last scheduler/digest pass                                                               |
 
 Keyword rules and archiving are deliberately cheap and deterministic, not AI work. `career_preferences.includeKeywords` gates discovery: a listing is imported only when it mentions at least one required keyword, and `negativeKeywords` blocks a listing outright. Rules are matched case-insensitively against title, company and description, exclusions always win, an empty required list imports everything, and keywords never influence the match score. `jobs.archived_at` marks a listing the user set aside: archived rows keep their canonical URL/hash and provenance, so a later sync re-uses the existing row instead of importing the posting again, while every list, count and automatic evaluation excludes it. Archived rows are restored in place, and manual entries are never gated by keywords because the user added them deliberately.
 
-Later migrations add separate job_locations/job_skills indexes when filtering volume warrants them, company_watchlists, notifications and detailed applications. Roles/skills and their priorities initially live in validated preferences JSONB. Profile data is stored separately from original resume content. Originals remain in private PostgreSQL storage for the local MVP; production moves them to encrypted object storage with short-lived authorized downloads and retention/deletion controls.
+Scheduling and alerting are also deterministic. `job_sources.schedule` is one of Manual, Hourly, Every 4 hours, Twice daily or Daily, and `next_run_at` is always an aligned UTC instant computed by the shared `nextRunAfter` helper, so a restart cannot pile up duplicate refreshes and missed slots collapse into a single run. Watchlist entries are the user's own priority list; an entry that names a supported ATS board also owns the `job_sources` row the worker scans, so that employer is checked directly even when it never appears on a public feed. Alerts are opt-in in-app records keyed by user and a deterministic dedupe key, so replaying an evaluation or a digest never duplicates a notification. Nothing is emailed, messaged or pushed.
+
+Later migrations add separate job_locations/job_skills indexes when filtering volume warrants them and detailed applications. Roles/skills and their priorities initially live in validated preferences JSONB. Profile data is stored separately from original resume content. Originals remain in private PostgreSQL storage for the local MVP; production moves them to encrypted object storage with short-lived authorized downloads and retention/deletion controls.
 
 ## API architecture
 
 JSON errors use `{ error: string }` with meaningful HTTP status codes. Never return a password hash, session token, database error, or another user's resume. All mutations require a matching configured Origin (CSRF protection). Session expiry and authorization are checked in the data layer, not just page navigation.
 
-| Endpoint                                 | Phase 1 behavior                                                        |
-| ---------------------------------------- | ----------------------------------------------------------------------- |
-| POST /api/auth/register, /login, /logout | local email/password account, opaque DB session, rate limited           |
-| GET/PUT /api/profile                     | read/update validated private structured profile                        |
-| GET/PUT /api/preferences                 | targets, weighted role groups, skills, hard filters and ranking weights |
-| GET/POST /api/resumes                    | metadata listing and bounded TXT/PDF/DOCX text extraction               |
-| GET/DELETE /api/resumes/:id              | owner-only original download and deletion                               |
-| GET /api/jobs                            | paginated query, location/work arrangement and saved-state filters      |
-| GET /api/jobs/:id                        | normalized listing and current user's evaluation/status                 |
-| PUT /api/jobs/:id/status                 | save/ignore/application status, transactional history                   |
-| PUT /api/jobs/:id/archive                | archive or restore a listing without losing its canonical identity      |
-| GET /api/health                          | database readiness without connection details                           |
+| Endpoint                                               | Behavior                                                                |
+| ------------------------------------------------------ | ----------------------------------------------------------------------- |
+| POST /api/auth/register, /login, /logout               | local email/password account, opaque DB session, rate limited           |
+| GET/PUT /api/profile                                   | read/update validated private structured profile                        |
+| GET/PUT /api/preferences                               | targets, weighted role groups, skills, hard filters and ranking weights |
+| GET/POST /api/resumes                                  | metadata listing and bounded TXT/PDF/DOCX text extraction               |
+| GET/DELETE /api/resumes/:id                            | owner-only original download and deletion                               |
+| GET /api/jobs                                          | paginated query, location/work arrangement and saved-state filters      |
+| GET /api/jobs/:id                                      | normalized listing and current user's evaluation/status                 |
+| PUT /api/jobs/:id/status                               | save/ignore/application status, transactional history                   |
+| PUT /api/jobs/:id/archive                              | archive or restore a listing without losing its canonical identity      |
+| GET/POST /api/sources                                  | list feeds and add a global or employer source                          |
+| POST /api/sources/:id                                  | user-triggered scan of one source, plus the bounded evaluation batch    |
+| PUT /api/sources/:id/schedule                          | set a Manual/Hourly/4-hourly/twice-daily/daily refresh schedule         |
+| GET/POST /api/watchlist, PUT/DELETE /api/watchlist/:id | watchlist entries, priorities and directly-scanned employer boards      |
+| GET /api/notifications, POST /api/notifications/mark   | in-app alerts and mark-read, user scoped                                |
+| GET /api/automation, POST /api/automation/digest       | worker health, source schedules, search history, on-demand digest       |
+| GET /api/health                                        | database readiness without connection details                           |
 
-User-triggered discovery uses GET/POST `/api/sources` and POST `/api/sources/:id`; matching uses POST `/api/jobs/:id/evaluate`, and the post-sync batch uses POST `/api/jobs/evaluation-batch`. Watchlists and notifications arrive with their actual services. No endpoints that silently succeed without doing work.
+Discovery uses GET/POST `/api/sources` and POST `/api/sources/:id`; matching uses POST `/api/jobs/:id/evaluate`, and the post-sync batch uses POST `/api/jobs/evaluation-batch`. No endpoints silently succeed without doing work.
 
 ## Connector contract and source policy
 
@@ -142,11 +162,17 @@ Implemented user-triggered and post-sync batch evaluation with `text-embedding-3
 
 The current budget guard sums the latest persisted match costs in the UTC month; re-evaluation overwrites usage, failures are not accounted for, and concurrent requests do not reserve budget. It is not a strict billing cap. Prices assume the default models. An append-only usage ledger, atomic reservations, model-specific prices, and immutable profile/preferences/prompt snapshots are still needed. Saved scores remain visible after profile/preferences changes until manually re-evaluated; only target embeddings are invalidated automatically. Hard constraints currently cover location, employment, seniority and comparable salary; work authorization and excluded companies/skills are not enforced as hard constraints.
 
-### Phase 4 — automation (next)
+### Phase 4 — automation (current)
 
-Use pg-boss documented queue creation, send/work and scheduling APIs for resumable searches, watchlists, opt-in notification delivery and diagnostics. Stand up `apps/worker` as the only process that runs source scans, so browser and network work never executes inside the Next.js request path. Schedule per-source refreshes with conditional fetches, honour the existing advisory lock, and add expired session/rate-limit cleanup. Verify crash/retry idempotency, source timeouts, no duplicate notifications and successful full scans before removal. No unsolicited outbound messages during setup.
+Implemented with pg-boss in `apps/worker`: four queues (`scan-source`, `schedule-sources`, `evaluate-batch`, `housekeeping`) with per-source singleton keys, exponential-backoff retries and bounded expirations. `schedule-sources` runs every minute and claims due sources through a guarded `next_run_at` update, so a duplicated or restarted tick cannot enqueue the same slot twice. `housekeeping` runs hourly, removes expired sessions, expired rate-limit buckets and read notifications older than 90 days, and generates the opt-in daily digest. The worker publishes a database heartbeat that the Automation page reads, and a missing or stale heartbeat is shown as "Not running" rather than hidden.
 
-### Phase 5 — advanced discovery
+Scheduled scans reuse the interactive scan engine from `packages/automation` and the existing per-workspace `jobfinder:discovery` advisory lock, so a scheduled scan and a user-triggered scan can never overlap. A retried scan reuses the pg-boss job id as its `search_runs.id`, so a crash mid-scan resumes as one run instead of two. Only a complete, removal-safe scan marks listings removed, exactly as in Phase 2. Evaluation runs one bounded batch per changed scan against the existing monthly budget check and monthly cost accounting.
+
+Watchlists, alerts and the digest are deterministic. Watchlist entries are user-scoped with a normalized company key; an entry naming a Greenhouse, Lever or Ashby board owns the employer source the worker scans on its schedule, and removing the entry disables that source instead of deleting its provenance. Alerts are opt-in in-app records written when an evaluated score reaches `notifyMinScore`, deduped by user and evaluation instant. The daily digest is opt-in, runs during the chosen UTC hour (or on demand), and only its narrative sentence is a model call — the counts, ordering and highlight selection are computed deterministically. No email, SMS, push or other outbound message exists in this phase. Local verification is recorded in [Phase 4 validation](phase-4-validation.md).
+
+One deliberate boundary remains: the interactive `POST /api/sources/:id` sync still executes the shared engine inside the Next.js request path, because it is an explicit, bounded, user-triggered action with visible progress. All scheduled network work — scans, evaluation, alerts, digests and cleanup — runs only in the worker. Routing the interactive sync through pg-boss as well is the remaining Phase 4 follow-up; it is listed in the validation document rather than implied.
+
+### Phase 5 — advanced discovery (next)
 
 Turn the connector platform into a discovery platform in the order below. Each step ships behind its own verification and can stop independently; nothing later depends on the AI step.
 

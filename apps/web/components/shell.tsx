@@ -17,9 +17,12 @@ import {
   Compass,
   Radar,
   Menu,
+  BookmarkCheck,
+  Workflow,
 } from "lucide-react";
 import { api } from "./client";
 import { JobSyncProvider, JobSyncFeedback, SyncJobsButton } from "./job-sync";
+import { NotificationsBell } from "./notifications-bell";
 const nav = [
   ["/", "Overview", LayoutDashboard],
   ["/jobs", "All opportunities", BriefcaseBusiness],
@@ -27,6 +30,8 @@ const nav = [
   ["/applications", "Applications", Layers3],
   ["/archived", "Archived", Archive],
   ["/discovery", "Discovery", Radar],
+  ["/watchlist", "Watchlist", BookmarkCheck],
+  ["/automation", "Automation", Workflow],
   ["/profile", "Career profile", UserRound],
   ["/preferences", "Preferences", SlidersHorizontal],
 ] as const;
@@ -109,6 +114,7 @@ export function Shell({
             </span>
             <div className="topbar-actions">
               <SyncJobsButton />
+              <NotificationsBell />
               <span className="private-badge">
                 <i />
                 Private workspace

@@ -1,6 +1,7 @@
-import { createHash, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
-export const digest = (value: string) =>
-  createHash("sha256").update(value).digest("hex");
+import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+// Hashing and URL canonicalization live in the shared package so the worker and
+// the web app compute identical session, source and job identities.
+export { canonicalUrl, digest } from "@jobfinder/shared/hash";
 const derive = (password: string, salt: string) =>
   new Promise<Buffer>((resolve, reject) => {
     scrypt(
@@ -27,12 +28,4 @@ export async function verifyPassword(password: string, encoded: string) {
     await derive(password, salt),
     Buffer.from(hash, "hex"),
   );
-}
-export function canonicalUrl(value: string) {
-  const url = new URL(value);
-  url.hash = "";
-  for (const key of [...url.searchParams.keys()])
-    if (/^(utm_|ref$|source$)/i.test(key)) url.searchParams.delete(key);
-  url.searchParams.sort();
-  return url.toString();
 }

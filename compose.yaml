@@ -47,5 +47,20 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+  worker:
+    build: .
+    command: npm run worker
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      DATABASE_URL: postgresql://jobfinder:local-development-only@postgres:5432/jobfinder
+      APP_ORIGIN: http://localhost:3000
+    # Scheduled scans, evaluation, digest and cleanup run here and nowhere else.
+    # No ports are published; the worker only talks to PostgreSQL and providers.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
 volumes:
   postgres-data:

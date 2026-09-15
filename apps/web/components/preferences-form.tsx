@@ -589,6 +589,79 @@ export function PreferencesForm({ initial }: { initial: Preferences }) {
               Total <strong>{total}%</strong>
             </div>
           </section>
+          <section className="panel form-panel">
+            <h2>Alerts and daily digest</h2>
+            <p className="muted">
+              Alerts are in-app records only. Nothing is emailed, messaged or
+              sent anywhere, and the daily digest is off until you enable it.
+            </p>
+            <label className="check-label">
+              <input
+                type="checkbox"
+                checked={data.notificationsEnabled}
+                onChange={(e) =>
+                  update("notificationsEnabled", e.target.checked)
+                }
+              />
+              Notify me when an evaluated match reaches my alert score
+            </label>
+            <label>
+              Alert score
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={data.notifyMinScore}
+                onChange={(e) =>
+                  update("notifyMinScore", Number(e.target.value))
+                }
+              />
+              <small>
+                Scores below this never create an alert. Scheduled scans
+                evaluate up to your batch size after each refresh.
+              </small>
+            </label>
+            <label className="check-label">
+              <input
+                type="checkbox"
+                checked={data.digestEnabled}
+                onChange={(e) => update("digestEnabled", e.target.checked)}
+              />
+              Generate a daily digest of new and strong matches
+            </label>
+            <label>
+              Digest score
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={data.digestMinScore}
+                onChange={(e) =>
+                  update("digestMinScore", Number(e.target.value))
+                }
+              />
+              <small>
+                Only evaluated matches at or above this score appear in the
+                digest highlights.
+              </small>
+            </label>
+            <label>
+              Digest hour (UTC)
+              <input
+                type="number"
+                min={0}
+                max={23}
+                value={data.digestHourUtc}
+                onChange={(e) =>
+                  update("digestHourUtc", Number(e.target.value))
+                }
+              />
+              <small>
+                The worker generates the digest during this UTC hour. You can
+                also generate one on demand from Notifications.
+              </small>
+            </label>
+          </section>
         </div>
         {error && (
           <p className="error" role="alert">

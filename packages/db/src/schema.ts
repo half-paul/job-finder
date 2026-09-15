@@ -98,9 +98,14 @@ export const jobSources = pgTable(
     board: text().notNull(),
     enabled: boolean().default(true).notNull(),
     sourceUrl: text("source_url"),
+    /** Manual sources never run on a schedule; the worker owns scheduled runs. */
+    schedule: text().notNull().default("Manual"),
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
   },
   (t) => [
     uniqueIndex("source_owner_identity_unique").on(t.ownerId, t.identity),
+    index("sources_due_idx").on(t.enabled, t.nextRunAt),
   ],
 );
 export const jobs = pgTable(
@@ -274,6 +279,74 @@ export const searchRuns = pgTable(
     filtered: integer().notNull().default(0),
     warnings: jsonb().$type<string[]>().notNull().default([]),
     error: text(),
+    /** Manual for a user-triggered sync, Schedule for a worker run. */
+    trigger: text().notNull().default("Manual"),
+    durationMs: integer("duration_ms"),
   },
   (t) => [index("search_runs_owner_started_idx").on(t.userId, t.startedAt)],
 );
+
+export const companyWatchlists = pgTable(
+  "company_watchlists",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    company: text().notNull(),
+    /** Case- and whitespace-normalized key; one entry per company per user. */
+    companyKey: text("company_key").notNull(),
+    domain: text().notNull().default(""),
+    provider: text(),
+    board: text().notNull().default(""),
+    priority: text().notNull().default("Interesting"),
+    notes: text().notNull().default(""),
+    /** Set when a watchlist entry owns a directly-scanned employer source. */
+    sourceId: uuid("source_id").references(() => jobSources.id, {
+      onDelete: "set null",
+    }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (t) => [
+    uniqueIndex("watchlist_owner_company_unique").on(t.userId, t.companyKey),
+    index("watchlist_owner_idx").on(t.userId),
+  ],
+);
+
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    jobId: uuid("job_id").references(() => jobs.id, { onDelete: "cascade" }),
+    kind: text().notNull(),
+    title: text().notNull(),
+    body: text().notNull().default(""),
+    score: integer(),
+    /** Deterministic identity so a repeated worker pass never duplicates an alert. */
+    dedupeKey: text("dedupe_key").notNull(),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("notifications_owner_dedupe_unique").on(t.userId, t.dedupeKey),
+    index("notifications_owner_created_idx").on(t.userId, t.createdAt),
+  ],
+);
+
+/**
+ * Small key/value store for worker bookkeeping: the heartbeat the diagnostics
+ * view reads, and the last completed automatic scan and digest instants.
+ */
+export const automationState = pgTable("automation_state", {
+  key: text().primaryKey(),
+  value: jsonb().$type<Record<string, unknown>>().notNull().default({}),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});

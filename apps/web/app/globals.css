@@ -152,6 +152,25 @@ small {
   background: var(--accent-soft);
   color: var(--accent);
 }
+.bell {
+  position: relative;
+  text-decoration: none;
+}
+.bell-count {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
 .row-actions {
   display: flex;
   align-items: center;
