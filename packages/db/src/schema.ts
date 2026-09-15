@@ -10,6 +10,7 @@ import {
   index,
   uniqueIndex,
   check,
+  vector,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type { Profile, Preferences, JobMatch } from "@jobfinder/shared";
@@ -128,6 +129,7 @@ export const jobs = pgTable(
     descriptionHash: text("description_hash").notNull(),
     source: text().notNull().default("Manual"),
     lifecycle: text().notNull().default("Active"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
     postedAt: timestamp("posted_at", { withTimezone: true }),
     discoveredAt: timestamp("discovered_at", { withTimezone: true })
       .defaultNow()
@@ -177,11 +179,45 @@ export const jobMatches = pgTable(
       .references(() => jobs.id, { onDelete: "cascade" }),
     data: jsonb().$type<JobMatch>().notNull(),
     version: text().notNull(),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    embeddingTokens: integer("embedding_tokens").notNull().default(0),
+    estimatedCostMicros: integer("estimated_cost_micros").notNull().default(0),
     evaluatedAt: timestamp("evaluated_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
   },
   (t) => [primaryKey({ columns: [t.userId, t.jobId] })],
+);
+export const targetEmbeddings = pgTable(
+  "target_embeddings",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    model: text().notNull(),
+    contentHash: text("content_hash").notNull(),
+    embedding: vector("embedding", { dimensions: 1536 }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.model] })],
+);
+export const jobEmbeddings = pgTable(
+  "job_embeddings",
+  {
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    model: text().notNull(),
+    contentHash: text("content_hash").notNull(),
+    embedding: vector("embedding", { dimensions: 1536 }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.jobId, t.model] })],
 );
 export const savedJobs = pgTable(
   "saved_jobs",
@@ -235,6 +271,7 @@ export const searchRuns = pgTable(
     added: integer().notNull().default(0),
     updated: integer().notNull().default(0),
     removed: integer().notNull().default(0),
+    filtered: integer().notNull().default(0),
     warnings: jsonb().$type<string[]>().notNull().default([]),
     error: text(),
   },

@@ -7,6 +7,7 @@ import {
   BriefcaseBusiness,
   Bookmark,
   Layers3,
+  Archive,
   UserRound,
   SlidersHorizontal,
   Moon,
@@ -18,11 +19,13 @@ import {
   Menu,
 } from "lucide-react";
 import { api } from "./client";
+import { JobSyncProvider, JobSyncFeedback, SyncJobsButton } from "./job-sync";
 const nav = [
   ["/", "Overview", LayoutDashboard],
   ["/jobs", "All opportunities", BriefcaseBusiness],
   ["/saved", "Saved", Bookmark],
   ["/applications", "Applications", Layers3],
+  ["/archived", "Archived", Archive],
   ["/discovery", "Discovery", Radar],
   ["/profile", "Career profile", UserRound],
   ["/preferences", "Preferences", SlidersHorizontal],
@@ -45,103 +48,109 @@ export function Shell({
     document.documentElement.dataset.theme = next ? "dark" : "light";
   }
   return (
-    <div className="workspace">
-      <aside className={open ? "sidebar is-open" : "sidebar"}>
-        <Link className="brand" href="/">
-          <span className="brand-mark">
-            <Compass size={23} />
-          </span>
-          JobFinder<span className="brand-ai">AI</span>
-        </Link>
-        <div className="workspace-label">YOUR CAREER WORKSPACE</div>
-        <nav aria-label="Main navigation">
-          {nav.map(([href, label, Icon], i) => (
-            <Link
-              onClick={() => setOpen(false)}
-              className={`${path === href || (href === "/jobs" && path.startsWith("/jobs/")) ? "nav-link active" : "nav-link"}${i === 5 ? " nav-divider" : ""}`}
-              href={href}
-              key={href}
-            >
-              <Icon size={18} />
-              {label}
-            </Link>
-          ))}
-        </nav>
-        <div className="sidebar-note">
-          <span className="small-label">A MORE INTENTIONAL SEARCH</span>
-          <p>
-            Your experience.
-            <br />
-            Your direction.
-            <br />
-            Your next chapter.
-          </p>
-          <Link href="/profile">
-            Shape your profile <ArrowUpRight size={15} />
-          </Link>
-        </div>
-        <div className="sidebar-user">
-          <span className="avatar">{name.slice(0, 2).toUpperCase()}</span>
-          <div>
-            <strong>{name}</strong>
-            <span>Personal workspace</span>
-          </div>
-        </div>
-      </aside>
-      <div className="main">
-        <header className="topbar">
-          <button
-            className="icon-button mobile-menu"
-            aria-label="Toggle navigation"
-            onClick={() => setOpen(!open)}
-          >
-            <Menu size={20} />
-          </button>
-          <span className="breadcrumb">
-            Workspace <span>/</span>{" "}
-            <strong>
-              {nav.find(([href]) => href === path)?.[1] ?? "Opportunity"}
-            </strong>
-          </span>
-          <div className="topbar-actions">
-            <span className="private-badge">
-              <i />
-              Private workspace
+    <JobSyncProvider>
+      <div className="workspace">
+        <aside className={open ? "sidebar is-open" : "sidebar"}>
+          <Link className="brand" href="/">
+            <span className="brand-mark">
+              <Compass size={23} />
             </span>
-            <button
-              className="icon-button"
-              aria-label="Toggle color theme"
-              onClick={toggleTheme}
-            >
-              {dark ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
-            <button
-              className="icon-button"
-              aria-label="Sign out"
-              onClick={async () => {
-                try {
-                  await api("auth/logout", "POST");
-                  router.push("/login");
-                  router.refresh();
-                } catch (e) {
-                  setError((e as Error).message);
-                }
-              }}
-            >
-              <LogOut size={18} />
-            </button>
+            JobFinder<span className="brand-ai">AI</span>
+          </Link>
+          <div className="workspace-label">YOUR CAREER WORKSPACE</div>
+          <nav aria-label="Main navigation">
+            {nav.map(([href, label, Icon]) => (
+              <Link
+                onClick={() => setOpen(false)}
+                className={`${path === href || (href === "/jobs" && path.startsWith("/jobs/")) ? "nav-link active" : "nav-link"}${href === "/profile" ? " nav-divider" : ""}`}
+                href={href}
+                key={href}
+              >
+                <Icon size={18} />
+                {label}
+              </Link>
+            ))}
+          </nav>
+          <div className="sidebar-note">
+            <span className="small-label">A MORE INTENTIONAL SEARCH</span>
+            <p>
+              Your experience.
+              <br />
+              Your direction.
+              <br />
+              Your next chapter.
+            </p>
+            <Link href="/profile">
+              Shape your profile <ArrowUpRight size={15} />
+            </Link>
           </div>
-        </header>
-        {error && (
-          <p role="alert" className="error">
-            {error}
-          </p>
-        )}
-        <main className="content">{children}</main>
-        <footer className="footer">
-          Built around your next move.<span>JobFinder AI · Foundation</span>
-        </footer>
+          <div className="sidebar-user">
+            <span className="avatar">{name.slice(0, 2).toUpperCase()}</span>
+            <div>
+              <strong>{name}</strong>
+              <span>Personal workspace</span>
+            </div>
+          </div>
+        </aside>
+        <div className="main">
+          <header className="topbar">
+            <button
+              className="icon-button mobile-menu"
+              aria-label="Toggle navigation"
+              onClick={() => setOpen(!open)}
+            >
+              <Menu size={20} />
+            </button>
+            <span className="breadcrumb">
+              Workspace <span>/</span>{" "}
+              <strong>
+                {nav.find(([href]) => href === path)?.[1] ?? "Opportunity"}
+              </strong>
+            </span>
+            <div className="topbar-actions">
+              <SyncJobsButton />
+              <span className="private-badge">
+                <i />
+                Private workspace
+              </span>
+              <button
+                className="icon-button"
+                aria-label="Toggle color theme"
+                onClick={toggleTheme}
+              >
+                {dark ? <Sun size={18} /> : <Moon size={18} />}
+              </button>
+              <button
+                className="icon-button"
+                aria-label="Sign out"
+                onClick={async () => {
+                  try {
+                    await api("auth/logout", "POST");
+                    router.push("/login");
+                    router.refresh();
+                  } catch (e) {
+                    setError((e as Error).message);
+                  }
+                }}
+              >
+                <LogOut size={18} />
+              </button>
+            </div>
+          </header>
+          {error && (
+            <p role="alert" className="error">
+              {error}
+            </p>
+          )}
+          <main className="content">
+            <JobSyncFeedback />
+            {children}
+          </main>
+          <footer className="footer">
+            Built around your next move.<span>JobFinder AI · Foundation</span>
+          </footer>
+        </div>
       </div>
-    </div>
+    </JobSyncProvider>
   );
 }

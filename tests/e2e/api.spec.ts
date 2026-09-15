@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
+import { defaultPreferences } from "@jobfinder/shared";
 const headers = { Origin: "http://localhost:3000" };
 const password = "Integration-only password 123!";
 test("API validates input, enforces ownership, and revokes persisted sessions", async ({
@@ -173,4 +174,107 @@ test("source management validates allowlists and keeps sources user-scoped", asy
     await request.get("/api/sources", { headers })
   ).json();
   expect(otherSources).toHaveLength(0);
+});
+
+test("hard preferences block AI evaluation before an API request", async ({
+  request,
+}) => {
+  const headers = { Origin: "http://localhost:3000" };
+  const email = `matching-${randomUUID()}@example.test`;
+  const password = "Integration-only password 123!";
+  expect(
+    (
+      await request.post("/api/auth/register", {
+        headers,
+        data: { email, password, name: "Matching tester" },
+      })
+    ).ok(),
+  ).toBe(true);
+  expect(
+    (
+      await request.put("/api/profile", {
+        headers,
+        data: {
+          name: "Matching tester",
+          summary:
+            "Technology executive with cloud infrastructure and security leadership experience.",
+          currentRole: "VP Infrastructure",
+          previousRoles: [],
+          yearsExperience: 20,
+          location: "Vancouver, Canada",
+          skills: ["AWS", "Cloud architecture", "Security governance"],
+          industries: ["SaaS"],
+          certifications: [],
+          education: [],
+          languages: [],
+          workAuthorization: [],
+          leadershipExperience: "Led platform and security organizations",
+          managementExperience: "Managed engineering leaders",
+          companySizeExperience: [],
+          architectureExperience: "Designed cloud platform architecture",
+        },
+      })
+    ).ok(),
+  ).toBe(true);
+  expect(
+    (
+      await request.put("/api/preferences", {
+        headers,
+        data: {
+          ...defaultPreferences,
+          employmentTypes: ["Contract"],
+          hardRequirements: {
+            location: false,
+            employment: true,
+            seniority: false,
+            salary: false,
+          },
+        },
+      })
+    ).ok(),
+  ).toBe(true);
+  const job = await (
+    await request.post("/api/jobs", {
+      headers,
+      data: {
+        title: "VP Platform Engineering",
+        company: "Example Matching Inc.",
+        description:
+          "Lead cloud infrastructure, platform engineering and security programs for a growing SaaS company.",
+        location: "Vancouver, Canada",
+        country: "Canada",
+        industry: "SaaS",
+        employmentType: "Full-time",
+        seniority: "VP",
+        workType: "Remote",
+        salaryMin: null,
+        salaryMax: null,
+        salaryPeriod: "year",
+        currency: "CAD",
+        jobUrl: `https://example.test/careers/${randomUUID()}`,
+        postedAt: null,
+      },
+    })
+  ).json();
+  const evaluation = await (
+    await request.post(`/api/jobs/${job.id}/evaluate`, { headers })
+  ).json();
+  expect(evaluation.match).toBeNull();
+  expect(evaluation.blocked.passed).toBe(false);
+  expect(evaluation.blocked.reason).toContain("employment type");
+  expect(
+    (
+      await request.put("/api/preferences", {
+        headers,
+        data: { ...defaultPreferences, aiMonthlyBudgetMicros: 0 },
+      })
+    ).ok(),
+  ).toBe(true);
+  const overBudget = await request.post(`/api/jobs/${job.id}/evaluate`, {
+    headers,
+  });
+  expect(overBudget.status()).toBe(429);
+  expect((await overBudget.json()).error).toContain("monthly AI budget");
+  const detail = await (await request.get(`/api/jobs/${job.id}`)).json();
+  expect(detail.match).toBeNull();
 });

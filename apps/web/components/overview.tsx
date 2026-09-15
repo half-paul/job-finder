@@ -28,13 +28,15 @@ export async function Overview({ view = "overview" }: { view?: string }) {
       db.select().from(preferences).where(eq(preferences.userId, user.id)),
     ]);
   const title =
-    view === "saved"
-      ? "A shortlist with purpose."
-      : view === "applications"
-        ? "Keep your next steps moving."
-        : view === "all"
-          ? "Every possibility, in perspective."
-          : "Your next move, in focus.";
+    view === "archived"
+      ? "Set aside, not forgotten."
+      : view === "saved"
+        ? "A shortlist with purpose."
+        : view === "applications"
+          ? "Keep your next steps moving."
+          : view === "all"
+            ? "Every possibility, in perspective."
+            : "Your next move, in focus.";
   const ready = [
     Boolean(profileRows[0]?.data.currentRole),
     resumeRows.length > 0,
@@ -51,7 +53,9 @@ export async function Overview({ view = "overview" }: { view?: string }) {
           <p>
             {view === "overview"
               ? "A considered view of your opportunities and what comes next."
-              : "Less scattered searching. More meaningful progress."}
+              : view === "archived"
+                ? "Hidden from your counts and lists, and never imported again."
+                : "Less scattered searching. More meaningful progress."}
           </p>
         </div>
         <Button asChild>

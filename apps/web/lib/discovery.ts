@@ -1,13 +1,22 @@
 import "server-only";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   getDb,
+  getPool,
   jobReferences,
   jobSources,
   jobs,
+  preferences,
   searchRuns,
 } from "@jobfinder/db";
-import { sourceInputSchema } from "@jobfinder/shared";
+import {
+  defaultPreferences,
+  isGlobalSource,
+  keywordFilter,
+  preferencesSchema,
+  sourceInputSchema,
+} from "@jobfinder/shared";
 import {
   createConnector,
   providerName,
@@ -38,21 +47,17 @@ export async function listSources(userId: string) {
     .orderBy(desc(searchRuns.startedAt));
   return sources.map((source) => ({
     source,
-    lastRun:
-      runs.find(
-        (run) => run.sourceId === source.id && run.status === "Succeeded",
-      ) ??
-      runs.find((run) => run.sourceId === source.id) ??
-      null,
+    lastRun: runs.find((run) => run.sourceId === source.id) ?? null,
   }));
 }
 
 export async function createSource(userId: string, body: unknown) {
   const input = sourceInputSchema.parse(body);
+  const global = isGlobalSource(input.provider);
   const identity =
     input.provider === "JSON-LD" && input.sourceUrl
       ? canonicalUrl(input.sourceUrl)
-      : `${input.provider}:${input.board}`;
+      : `${input.provider}:${global ? input.provider.toLowerCase() : input.board}`;
   const allowedHosts = (process.env.JSON_LD_ALLOWED_HOSTS ?? "")
     .split(",")
     .map((host) => host.trim().toLowerCase())
@@ -75,10 +80,12 @@ export async function createSource(userId: string, body: unknown) {
     .values({
       ownerId: userId,
       identity,
-      company: input.company,
+      company: global
+        ? input.provider
+        : input.company ||
+          new URL(input.sourceUrl ?? "https://example.invalid").hostname,
       provider: input.provider,
-      board:
-        input.provider === "RemoteOK" ? "remoteok" : input.board || "json-ld",
+      board: global ? input.provider.toLowerCase() : input.board || "json-ld",
       sourceUrl:
         input.provider === "JSON-LD" ? canonicalUrl(input.sourceUrl!) : null,
       enabled: true,
@@ -90,12 +97,88 @@ export async function createSource(userId: string, body: unknown) {
 }
 
 export async function scanSource(userId: string, sourceId: string) {
-  const db = getDb();
+  const client = await getPool().connect();
+  let locked = false;
+  let releaseError: Error | undefined;
+  try {
+    // Session lock covers network work without holding an open transaction.
+    // Serialize each workspace so overlapping boards cannot duplicate imports.
+    const result = await client.query<{ locked: boolean }>(
+      "SELECT pg_try_advisory_lock(hashtext('jobfinder:discovery'), hashtext($1)) AS locked",
+      [userId],
+    );
+    locked = result.rows[0].locked;
+    if (!locked)
+      throw new HttpError(
+        409,
+        "A source sync is already running in your workspace. Try again when it finishes.",
+      );
+    return await scanSourceWithDb(userId, sourceId, drizzle(client));
+  } finally {
+    if (locked) {
+      try {
+        await client.query(
+          "SELECT pg_advisory_unlock(hashtext('jobfinder:discovery'), hashtext($1))",
+          [userId],
+        );
+      } catch (error) {
+        releaseError =
+          error instanceof Error
+            ? error
+            : new Error("Could not release discovery lock");
+      }
+    }
+    client.release(releaseError);
+  }
+}
+
+type DiscoveryDb = NodePgDatabase;
+
+async function scanSourceWithDb(
+  userId: string,
+  sourceId: string,
+  db: DiscoveryDb,
+) {
   const [source] = await db
     .select()
     .from(jobSources)
     .where(and(eq(jobSources.id, sourceId), eq(jobSources.ownerId, userId)));
   if (!source) throw new HttpError(404, "Source not found.");
+  if (!source.enabled) throw new HttpError(409, "This source is disabled.");
+  if (source.provider === "Jobicy") {
+    const [previous] = await db
+      .select()
+      .from(searchRuns)
+      .where(
+        and(
+          eq(searchRuns.sourceId, source.id),
+          eq(searchRuns.status, "Succeeded"),
+        ),
+      )
+      .orderBy(desc(searchRuns.startedAt))
+      .limit(1);
+    if (previous && Date.now() - previous.startedAt.getTime() < 3_600_000)
+      return {
+        ...previous,
+        added: 0,
+        updated: 0,
+        removed: 0,
+        filtered: 0,
+        warnings: [
+          "Using the latest Jobicy scan. This feed refreshes at most once per hour.",
+        ],
+      };
+  }
+
+  const [preferenceRow] = await db
+    .select()
+    .from(preferences)
+    .where(eq(preferences.userId, userId));
+  // Keyword rules are read once per scan so imports stay consistent even if
+  // preferences change while a long feed is being walked.
+  const settings = preferencesSchema.parse(
+    preferenceRow?.data ?? defaultPreferences,
+  );
 
   const [run] = await db
     .insert(searchRuns)
@@ -124,14 +207,17 @@ export async function scanSource(userId: string, sourceId: string) {
         : undefined;
     let page = await connector.search(query, initialCursor);
     const warnings: string[] = [];
+    let canMarkRemovals = true;
     const seen: string[] = [];
     let added = 0;
     let updated = 0;
     let discovered = 0;
+    let filtered = 0;
     let cursor = page.next;
     const maxJobs = 5000;
 
     while (true) {
+      if (page.canMarkRemovals === false) canMarkRemovals = false;
       if (!page.notModified) {
         discovered += page.jobs.length;
         for (const reference of page.jobs) {
@@ -145,7 +231,15 @@ export async function scanSource(userId: string, sourceId: string) {
           try {
             const raw = await connector.fetchJob(fullReference);
             const normalized = await connector.normalize(raw, { query });
+            // The external id is already recorded as seen, so a listing that
+            // is skipped here is never marked removed by an incomplete match.
+            // Previously imported listings therefore stay untouched.
+            if (!keywordFilter(normalized, settings).passed) {
+              filtered++;
+              continue;
+            }
             const result = await upsertDiscoveredJob(
+              db,
               userId,
               source.id,
               normalized,
@@ -174,12 +268,14 @@ export async function scanSource(userId: string, sourceId: string) {
             added,
             updated,
             removed: 0,
+            filtered,
             warnings: [
               cursor
                 ? `Scan stopped at the ${maxJobs}-job safety cap; no removals were marked.`
                 : "Source returned an incomplete page without a continuation cursor; no removals were marked.",
+              ...keywordWarnings(filtered),
               ...warnings.slice(0, 99),
-            ],
+            ].slice(0, 100),
           })
           .where(eq(searchRuns.id, run.id))
           .returning();
@@ -191,7 +287,13 @@ export async function scanSource(userId: string, sourceId: string) {
     }
 
     if (!page.notModified) {
-      const removed = await deactivateMissingReferences(source.id, seen);
+      const removed = canMarkRemovals
+        ? await deactivateMissingReferences(db, source.id, seen)
+        : 0;
+      if (!canMarkRemovals)
+        warnings.push(
+          "This feed contains recent listings across employers. Missing listings are not marked removed.",
+        );
       await db
         .update(jobSources)
         .set({
@@ -208,7 +310,8 @@ export async function scanSource(userId: string, sourceId: string) {
           added,
           updated,
           removed,
-          warnings: warnings.slice(0, 100),
+          filtered,
+          warnings: [...keywordWarnings(filtered), ...warnings].slice(0, 100),
         })
         .where(eq(searchRuns.id, run.id))
         .returning();
@@ -224,6 +327,7 @@ export async function scanSource(userId: string, sourceId: string) {
         added,
         updated,
         removed: 0,
+        filtered,
         warnings: ["Source was not modified since the previous complete scan."],
       })
       .where(eq(searchRuns.id, run.id))
@@ -245,12 +349,19 @@ export async function scanSource(userId: string, sourceId: string) {
   }
 }
 
+const keywordWarnings = (filtered: number) =>
+  filtered
+    ? [
+        `${filtered} ${filtered === 1 ? "listing was" : "listings were"} skipped by your keyword filters.`,
+      ]
+    : [];
+
 async function upsertDiscoveredJob(
+  db: DiscoveryDb,
   userId: string,
   sourceId: string,
   normalized: NormalizedJob,
 ): Promise<"added" | "updated" | "unchanged"> {
-  const db = getDb();
   const jobUrl = canonicalUrl(normalized.jobUrl);
   const canonicalHash = digest(jobUrl);
   const values = {
@@ -327,8 +438,11 @@ async function upsertDiscoveredJob(
       : "updated";
 }
 
-async function deactivateMissingReferences(sourceId: string, seen: string[]) {
-  const db = getDb();
+async function deactivateMissingReferences(
+  db: DiscoveryDb,
+  sourceId: string,
+  seen: string[],
+) {
   const active = await db
     .select({
       jobId: jobReferences.jobId,

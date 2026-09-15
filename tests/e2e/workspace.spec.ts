@@ -107,6 +107,23 @@ test("private workspace persists profile, resume, preferences and job progress",
   ).toBeVisible();
   const jobId = page.url().split("/").pop();
   expect((await other.request.get(`/api/jobs/${jobId}`)).status()).toBe(404);
+  expect(
+    (
+      await other.request.post(`/api/jobs/${jobId}/evaluate`, {
+        headers: origin,
+      })
+    ).status(),
+  ).toBe(404);
+  await page
+    .getByRole("button", { name: "Evaluate match", exact: true })
+    .click();
+  await expect(
+    page.locator(".match-evaluator").getByRole("alert"),
+  ).toContainText("Add your current role, summary and skills");
+  await page.screenshot({
+    path: "test-results/matching-validation-desktop.png",
+    fullPage: true,
+  });
   await page.getByLabel("Your progress").selectOption("Saved");
   await page.getByLabel("Private notes").fill("Review leadership scope.");
   await page.getByRole("button", { name: "Update progress" }).click();
