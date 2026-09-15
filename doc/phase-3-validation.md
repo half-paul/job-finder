@@ -9,13 +9,13 @@ Validated on 2026-09-14 with Node 24.15.0 on the host, Node 24.21.0 in Docker, P
 | Formatting                      | `npm run format:check`                                                        | Passed                                                                          |
 | Lint                            | `npm run lint`                                                                | Passed                                                                          |
 | TypeScript                      | `npm run typecheck`                                                           | Passed                                                                          |
-| Deterministic unit tests        | `npm test`                                                                    | 30 passed across five files                                                     |
+| Deterministic unit tests        | `npm test`                                                                    | 43 passed across six files                                                      |
 | Dependency audit                | `npm audit --audit-level=moderate`                                            | Zero known vulnerabilities at verification time                                 |
 | Schema drift                    | `npm run db:generate`                                                         | 17 tables; no schema changes                                                    |
 | Existing database migrations    | `npm run db:migrate`                                                          | Passed, including replay during Compose startup                                 |
 | Clean database migrations       | Migration container against a separate empty database, then replay            | Passed after fixing extension initialization order                              |
 | Host production build           | `npm run build`                                                               | Passed                                                                          |
-| Default integration suite       | `npm run test:e2e`                                                            | Five passed; two external smoke tests skipped intentionally                     |
+| Default integration suite       | `npm run test:e2e`                                                            | Ten passed; three external smoke tests skipped intentionally                    |
 | Lever live smoke                | `DISCOVERY_LIVE_SMOKE=1 npm run test:e2e -- tests/e2e/discovery-live.spec.ts` | Passed against host and Docker                                                  |
 | OpenAI live smoke               | `AI_LIVE_SMOKE=1 npm run test:e2e -- tests/e2e/matching-live.spec.ts`         | Passed against host and Docker                                                  |
 | Container build/start/readiness | `docker compose up --build -d --wait`                                         | Migration succeeded; PostgreSQL and web healthy                                 |
@@ -26,9 +26,9 @@ Agent shell commands use `rtk proxy` before the commands shown here, per `AGENTS
 
 ## Coverage and observed behavior
 
-- Unit tests cover aggregation, cosine similarity, hard requirements, deterministic evidence text, output schemas, token/cost calculation, refusal/malformed/out-of-range evaluation rejection, invalid embedding dimensions and provider errors, alongside existing security/parser/connector tests. They use injected fetch fixtures and require no API key or network.
-- Real PostgreSQL/API tests cover account/session persistence and revocation, foreign keys, pgvector, origin checks, source ownership, hard-filter precedence, and zero-budget rejection with no saved match.
-- Browser tests cover account/profile/preferences/resume/job workflows, cross-account access including evaluation, missing-profile errors, saved state/history, filtering, mobile layout, theme and sign-in/out.
+- Unit tests cover aggregation, cosine similarity, hard requirements, deterministic evidence text, output schemas, token/cost calculation, refusal/malformed/out-of-range evaluation rejection, invalid embedding dimensions and provider errors, alongside existing security, parser, connector, keyword-gate and resume tests. They use injected fetch fixtures and require no API key or network.
+- Real PostgreSQL/API tests cover account/session persistence and revocation, foreign keys, pgvector, origin checks, source ownership, hard-filter precedence, archive/restore scoping, and zero-budget rejection with no saved match.
+- Browser tests cover account/profile/preferences/resume/job workflows, cross-account access including evaluation, missing-profile errors, saved state/history, keyword-filtered imports, archive and restore counts, filtering, mobile layout, theme and sign-in/out.
 - Live matching uses only a fictional executive and synthetic listing. It verifies real scores within 0–100, positive token/cost usage, saved matching data, one target/job embedding each, successful UI re-evaluation with zero new embedding tokens, and target-embedding invalidation after saving the profile.
 - In the observed Docker cache check, the first evaluation used 668 input, 225 output and 160 embedding tokens (estimated USD 0.001517). Re-evaluation used 669 input, 260 output and zero embedding tokens (estimated USD 0.001672). These are application estimates for that run, not a billing statement or stable model output.
 - Live discovery verifies import, idempotent re-import, description updates and complete-scan removal using Lever's public demo board. Other connectors have deterministic fixture coverage, not live coverage in this session.
