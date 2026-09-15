@@ -1,6 +1,6 @@
 # JobFinder AI — architecture and delivery plan
 
-Status: Phase 1 + Phase 2 implementation. The requirements document remains the product specification. This design deliberately leaves AI matching and automation to their specified phases; an empty database must never imply invented job listings or AI scores.
+Status: Phase 1 + Phase 2 + Phase 3 implementation, plus keyword import gates and listing archiving. The requirements document remains the product specification. This design deliberately leaves automation to its specified phase; an empty database must never imply invented job listings or AI scores.
 
 ## Architecture
 
@@ -12,8 +12,13 @@ flowchart TD
   Web --> DB[(PostgreSQL 16 + pgvector)]
   Web --> Documents[Private resume records]
   Worker[Node worker: pg-boss, Phase 4] --> DB
-  Worker --> Sources[Permitted ATS APIs and feeds, Phase 2]
-  Sources --> Normalize[Normalize and deduplicate]
+  Worker --> Discovery[Company discovery and career URL finder, Phase 5]
+  Discovery --> Detector[ATS detector: Greenhouse, Lever, Ashby, Workday, SmartRecruiters, custom]
+  Detector --> Sources[Permitted ATS APIs and feeds, Phase 2]
+  Detector --> Crawler[Isolated browser crawler and saved API patterns, Phase 5]
+  Sources --> Extract[Job extractor: API payload, JSON-LD, HTML, bounded AI]
+  Crawler --> Extract
+  Extract --> Normalize[Location normalization, deduplicate, freshness]
   Normalize --> DB
   DB --> Filter[Hard constraints and inexpensive retrieval]
   Filter --> Embeddings[Embedding retrieval, Phase 3]
@@ -27,8 +32,9 @@ flowchart TD
 - `apps/web`: Next.js pages, route handlers, server-only auth and application services, reusable UI.
 - `packages/db`: typed schema, versioned SQL migrations, database connection and migration command.
 - `packages/shared`: Zod input schemas, profile/preferences and job contracts.
-- `packages/job-sources`: source connector contract; concrete adapters arrive in Phase 2.
-- `packages/matching`: deterministic weight validation and score aggregation; semantic evaluation arrives in Phase 3.
+- `packages/job-sources`: source connector contract; multi-employer RemoteOK and Jobicy feeds plus employer-specific Greenhouse, Lever, Ashby and allowlisted JSON-LD adapters.
+- `packages/matching`: deterministic filters/aggregation, embedding client/cache contracts and structured AI evaluation.
+- `packages/discovery` (Phase 5): company discovery, career URL finder, ATS detector, structured location normalizer and the discovery transport. Depends on `packages/job-sources` for connectors; never the reverse.
 - `apps/worker` and `packages/ai`: reserved for the actual worker and AI implementation, not empty running services.
 - `tests`: unit and real PostgreSQL/API/E2E verification. `doc`: decisions and plans.
 
@@ -36,24 +42,29 @@ flowchart TD
 
 Use UUID primary keys and timezone-aware timestamps. Private records always carry a user foreign key. Every private read and write must scope by authenticated user; public job records can be shared. Prefer typed JSONB for evolving structured profile/preferences, while keeping searchable jobs relational.
 
-| Table              | Important columns and constraints                                                                                               |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| users              | unique normalized email, password hash, name, role, created_at                                                                  |
-| sessions           | SHA-256 token hash PK, user_id FK, expiry; raw tokens only in HTTP-only cookies                                                 |
-| rate_limits        | hashed bucket key PK, count, expiry; atomic update shared across instances                                                      |
-| user_profiles      | user_id PK/FK, typed structured profile JSONB, updated_at                                                                       |
-| career_preferences | user_id PK/FK, typed preferences JSONB, updated_at                                                                              |
-| resumes            | id, user_id, filename, MIME, original bytes encoded privately, extracted text, created_at                                       |
-| companies          | id, name, domain, optional industry/size/overview                                                                               |
-| job_sources        | id, provider, unique provider/board identity, enabled, source URL                                                               |
-| jobs               | id, company_id, title, description, employment/seniority/location, compensation, canonical URL/hash, lifecycle dates and status |
-| job_references     | job_id + source_id + external_id; retain all provenance for deduplicated listings                                               |
-| job_matches        | user_id + job_id PK, qualification/interest/overall scores, confidence, versioned explanation JSONB, evaluated_at               |
-| saved_jobs         | user_id + job_id PK, action/status, notes, updated_at                                                                           |
-| job_status_history | id, user_id, job_id, action, created_at; append on every user action                                                            |
-| audit_events       | id, user_id, action, created_at; exclude sensitive payloads                                                                     |
+| Table              | Important columns and constraints                                                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| users              | unique normalized email, password hash, name, role, created_at                                                                                     |
+| sessions           | SHA-256 token hash PK, user_id FK, expiry; raw tokens only in HTTP-only cookies                                                                    |
+| rate_limits        | hashed bucket key PK, count, expiry; atomic update shared across instances                                                                         |
+| user_profiles      | user_id PK/FK, typed structured profile JSONB, updated_at                                                                                          |
+| career_preferences | user_id PK/FK, typed preferences JSONB, updated_at                                                                                                 |
+| resumes            | id, user_id, filename, MIME, original bytes encoded privately, extracted text, created_at                                                          |
+| companies          | id, name, domain, optional industry/size/overview; Phase 5 adds careers_url, ats, ats_key, crawl_strategy, status, last_checked_at, next_check_at  |
+| company_candidates | id, name, domain, origin (seed list, search, referral), status, created_at; Phase 5 input queue for career URL discovery                           |
+| crawl_patterns     | id, company_id, kind (ats, json-ld, http-json, browser), url_template, request JSONB, discovered_at, last_verified_at; saved API patterns, Phase 5 |
+| job_locations      | id, job_id, raw text, country, region, city, remote, applicant_countries[], confidence, evidence; Phase 5 structured location per posting          |
+| job_sources        | id, provider, unique provider/board identity, enabled, source URL                                                                                  |
+| jobs               | id, company_id, title, description, employment/seniority/location, compensation, canonical URL/hash, lifecycle dates, archived_at and status       |
+| job_references     | job_id + source_id + external_id; retain all provenance for deduplicated listings                                                                  |
+| job_matches        | user_id + job_id PK, qualification/interest/overall scores, confidence, versioned explanation JSONB, evaluated_at                                  |
+| saved_jobs         | user_id + job_id PK, action/status, notes, updated_at                                                                                              |
+| job_status_history | id, user_id, job_id, action, created_at; append on every user action                                                                               |
+| audit_events       | id, user_id, action, created_at; exclude sensitive payloads                                                                                        |
 
-Later migrations add separate job_locations/job_skills indexes when filtering volume warrants them, job_embeddings with model/dimension/version, company_watchlists, search_runs, notifications and detailed applications. Roles/skills and their priorities initially live in validated preferences JSONB. Profile data is stored separately from original resume content. Originals remain in private PostgreSQL storage for the local MVP; production moves them to encrypted object storage with short-lived authorized downloads and retention/deletion controls.
+Keyword rules and archiving are deliberately cheap and deterministic, not AI work. `career_preferences.includeKeywords` gates discovery: a listing is imported only when it mentions at least one required keyword, and `negativeKeywords` blocks a listing outright. Rules are matched case-insensitively against title, company and description, exclusions always win, an empty required list imports everything, and keywords never influence the match score. `jobs.archived_at` marks a listing the user set aside: archived rows keep their canonical URL/hash and provenance, so a later sync re-uses the existing row instead of importing the posting again, while every list, count and automatic evaluation excludes it. Archived rows are restored in place, and manual entries are never gated by keywords because the user added them deliberately.
+
+Later migrations add separate job_locations/job_skills indexes when filtering volume warrants them, company_watchlists, notifications and detailed applications. Roles/skills and their priorities initially live in validated preferences JSONB. Profile data is stored separately from original resume content. Originals remain in private PostgreSQL storage for the local MVP; production moves them to encrypted object storage with short-lived authorized downloads and retention/deletion controls.
 
 ## API architecture
 
@@ -69,19 +80,26 @@ JSON errors use `{ error: string }` with meaningful HTTP status codes. Never ret
 | GET /api/jobs                            | paginated query, location/work arrangement and saved-state filters      |
 | GET /api/jobs/:id                        | normalized listing and current user's evaluation/status                 |
 | PUT /api/jobs/:id/status                 | save/ignore/application status, transactional history                   |
+| PUT /api/jobs/:id/archive                | archive or restore a listing without losing its canonical identity      |
 | GET /api/health                          | database readiness without connection details                           |
 
-Searches, companies/watchlists, notifications, and matching APIs arrive with their actual services. No endpoints that silently succeed without doing work.
+User-triggered discovery uses GET/POST `/api/sources` and POST `/api/sources/:id`; matching uses POST `/api/jobs/:id/evaluate`, and the post-sync batch uses POST `/api/jobs/evaluation-batch`. Watchlists and notifications arrive with their actual services. No endpoints that silently succeed without doing work.
 
 ## Connector contract and source policy
 
-`SourceConnector` exposes `search(query, cursor, signal)`, `fetchJob(reference, signal)`, and `normalize(raw)`. Search returns a validated page plus continuation and conditional-fetch metadata. Board identity is configuration, never an arbitrary fetch URL. Normalized jobs retain provider, external ID, original URL, timestamps and unknown values explicitly. Phase 2 uses Greenhouse, Lever and Ashby board APIs, RemoteOK's permitted feed, and allowlisted JSON-LD pages.
+`SourceConnector` exposes `search(query, cursor, signal)`, `fetchJob(reference, signal)`, and `normalize(raw)`. Search returns a validated page plus continuation, conditional-fetch and removal-safety metadata. Board identity is configuration, never an arbitrary fetch URL. Normalized jobs retain provider, external ID, original URL, timestamps and unknown values explicitly. Discovery uses Greenhouse, Lever and Ashby board APIs, RemoteOK and Jobicy multi-employer feeds, and allowlisted JSON-LD pages.
+
+Retrieval follows a fixed preference ladder: official ATS API, then Schema.org `JobPosting` JSON-LD, then plain HTTP fetch of a discovered JSON endpoint, then an isolated browser crawl, and only last a bounded AI-directed browser session. Each company records which rung it uses in `companies.crawl_strategy`, and a cheaper rung discovered later replaces a costlier one. The ATS detector recognises `boards.greenhouse.io`, `job-boards.greenhouse.io`, `jobs.lever.co`, `jobs.ashbyhq.com`, `*.myworkdayjobs.com`, `jobs.smartrecruiters.com`, `*.icims.com` and `*.taleo.net` from redirects, links, iframes and script requests, and stores `{ ats, ats_key }` so the matching connector runs without a browser. Discovery is a one-time cost per company; refreshes reuse the stored strategy until it fails.
 
 Maintain a provider registry with approved hosts, API/access documentation, request budget, and disable switch. Respect terms, robots and rate limits; no CAPTCHA/authentication bypass. Honor Retry-After, cache ETags/Last-Modified, time out fetches, cap bytes and pages, prevent private-IP/redirect SSRF, and use deterministic fixture tests. Fetch failures must not mark all jobs removed; lifecycle updates require a successful complete scan. Prefer original ATS provenance. Ashby may need jobUrl-derived identity because its documented public payload has no guaranteed ID.
 
+## Location normalization
+
+Free-text locations such as "Toronto, Ontario", "Vancouver, BC", "Remote - Canada" or "North America Remote" are normalized deterministically into `job_locations` rows with country, region, city, remote flag, applicant countries and a confidence score with recorded evidence. Confidence is assigned by evidence type, highest first: `jobLocation.addressCountry` from JSON-LD or an ATS country field, `applicantLocationRequirements`, a recognised city plus province or state, an explicit "Remote Canada", a continental region such as "North America Remote", and finally a bare "Remote". A bare "Remote" never implies eligibility anywhere. The existing `countryCoverage()` and `matchesCountries()` functions remain the query API; they read structured rows when present and fall back to text matching for rows imported before Phase 5. Preferences express eligibility as selected countries plus the existing worldwide and unknown-country toggles, which cover the "Canada only", "Canada plus US remote" and "worldwide remote" cases. Normalization never calls a model.
+
 ## Matching design
 
-1. Evaluate explicit hard constraints first (country/work authorization, work type, employment, seniority, excluded companies/skills). Failed constraints are placed outside the normal ranked list; unknown constraints are visibly unresolved.
+1. Evaluate explicit hard constraints first (country/work authorization, work type, employment, seniority, excluded companies/skills). Failed constraints are placed outside the normal ranked list; unknown constraints are visibly unresolved. A posting that omits work arrangement or seniority is evaluated rather than rejected, so the AI judges the missing field from the description.
 2. Cheap lexical retrieval and configurable negative signals narrow the candidate set. These are retrieval signals, never presented as semantic AI evaluation.
 3. Embed job content and the minimal relevant structured profile; version/cache by content hash and model. Retrieve candidates using cosine similarity and pgvector.
 4. Evaluate the top bounded set with structured LLM output for role (20), experience (20), skills (15), leadership (15), industry (10), location (10), compensation (5), career direction (5). Each factor is 0–1 with evidence and uncertainty. Validate schema, reject out-of-range scores, and never let model output override hard constraints.
@@ -114,21 +132,36 @@ Allowed patterns: await Next cookies and dynamic params; parameterized Drizzle q
 
 Implement the workspace, database migration, real authentication, private profile/preferences forms, TXT/PDF/DOCX upload/download/delete, responsive light/dark dashboard with filters and genuine empty states, job detail and persistent user status. Copy the documented APIs above. Verify lint, strict typecheck, build, deterministic unit tests, real-DB integration tests, and Playwright account/profile/upload/authorization flows. Compose must start without credentials for external services. Do not claim matching/discovery is running.
 
-### Phase 2 — discovery (current)
+### Phase 2 — discovery (implemented)
 
-Implemented connectors for the official Greenhouse and Lever APIs, Ashby's public posting API, RemoteOK's permitted feed, and allowlisted JSON-LD `JobPosting` pages. The transport is HTTPS-only, fixed-host, redirect-rejecting, DNS-pinned, size/time bounded, and rejects non-public addresses. Provider payloads are Zod-validated and normalized without inventing missing values; HTML becomes bounded text. User-triggered complete scans upsert canonical jobs, retain provider/external-ID provenance, update changed descriptions, isolate per-job failures, and mark disappearances only after a complete scan. Resumable scheduling remains in Phase 4.
+Implemented connectors for the official Greenhouse and Lever APIs, Ashby's public posting API, RemoteOK's permitted feed, Jobicy's multi-employer feed, and allowlisted JSON-LD `JobPosting` pages. The transport is HTTPS-only, fixed-host, redirect-rejecting, DNS-pinned, size/time bounded, and rejects non-public addresses. Provider payloads are Zod-validated and normalized without inventing missing values; HTML becomes bounded text. User-triggered scans upsert canonical jobs, retain provider/external-ID provenance, update changed descriptions, and isolate per-job failures. Complete employer-owned feeds mark disappearances after a complete scan; rolling multi-employer feeds never mark removals. Resumable scheduling remains in Phase 4.
 
-### Phase 3 — matching
+### Phase 3 — matching (current)
 
-Implement versioned embeddings, pgvector retrieval and validated explanations using [OpenAI embeddings](https://developers.openai.com/api/docs/guides/embeddings) and [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs). Verify hard-filter precedence, deduplication, aliases, missing compensation, weight changes, injection fixtures and token caps; run approved live smoke tests only after secure key creation. Never invent scores when AI is unavailable.
+Implemented user-triggered and post-sync batch evaluation with `text-embedding-3-small`, cached 1,536-dimensional target/job pgvector embeddings, cosine similarity, hard-filter precedence, GPT-5.4 Mini Structured Outputs, Zod response validation, deterministic weighted aggregation, explicit unevaluated failures, per-evaluation token/cost tracking, and a user-configurable monthly budget. Target embeddings are invalidated when profile/preferences change; job embeddings use content hashes. Preferences select countries for list filtering and evaluation, and the post-sync batch evaluates at most the configured number of eligible new or changed jobs (default 5). Retrieved descriptions remain data, the evaluator has no tools, and invalid or unavailable AI never persists a score. Local verification and repeatable commands are recorded in [Phase 3 validation](phase-3-validation.md). Scheduled re-evaluation remains with Phase 4.
 
-### Phase 4 — automation
+The current budget guard sums the latest persisted match costs in the UTC month; re-evaluation overwrites usage, failures are not accounted for, and concurrent requests do not reserve budget. It is not a strict billing cap. Prices assume the default models. An append-only usage ledger, atomic reservations, model-specific prices, and immutable profile/preferences/prompt snapshots are still needed. Saved scores remain visible after profile/preferences changes until manually re-evaluated; only target embeddings are invalidated automatically. Hard constraints currently cover location, employment, seniority and comparable salary; work authorization and excluded companies/skills are not enforced as hard constraints.
 
-Use pg-boss documented queue creation, send/work and scheduling APIs for resumable searches, watchlists, opt-in notification delivery and diagnostics. Verify crash/retry idempotency, source timeouts, no duplicate notifications and successful full scans before removal. No unsolicited outbound messages during setup.
+### Phase 4 — automation (next)
+
+Use pg-boss documented queue creation, send/work and scheduling APIs for resumable searches, watchlists, opt-in notification delivery and diagnostics. Stand up `apps/worker` as the only process that runs source scans, so browser and network work never executes inside the Next.js request path. Schedule per-source refreshes with conditional fetches, honour the existing advisory lock, and add expired session/rate-limit cleanup. Verify crash/retry idempotency, source timeouts, no duplicate notifications and successful full scans before removal. No unsolicited outbound messages during setup.
 
 ### Phase 5 — advanced discovery
 
-Add providers only where access permits, using official docs and sanitized fixtures per source. Verify SSRF/robots/redirect policy and isolate any browser worker. Do not treat publicly reachable as permission to crawl.
+Turn the connector platform into a discovery platform in the order below. Each step ships behind its own verification and can stop independently; nothing later depends on the AI step.
+
+1. **Shared job pool.** Move `jobs`, `job_references` and `companies` to shared records with per-user `job_matches`, `saved_jobs` and archiving, as the schema section already intends. Keep manual entries private. Migrate existing per-owner rows by canonical URL and verify no user gains visibility into another user's manual entries.
+2. **Company discovery.** Add `company_candidates` fed by uploaded seed lists and, where a permitted search API is configured, `site:example.com careers` style queries. Deduplicate by registrable domain. No candidate becomes a `companies` row without a resolved careers URL.
+3. **Career URL finder.** For each candidate, fetch the homepage through a separate discovery transport that follows at most three redirects to public hosts, respects robots.txt, caps bytes and time, and blocks private addresses as the connector transport already does. Score links whose text or path contains careers, jobs, opportunities, join us, join our team, work with us, employment or open positions, then probe `/careers`, `/jobs`, `/careers/jobs`, `/company/careers` and `/about/careers`. Store `careers_url`, `status`, `last_checked_at` and `next_check_at`; do not rediscover a resolved company on every run.
+4. **ATS detector.** Inspect the resolved careers page for redirects, anchors, iframes and script sources matching the ATS host list, extract the board key, and create a `job_sources` row for the existing Greenhouse, Lever or Ashby connector. Add Workday, SmartRecruiters, iCIMS and Taleo connectors behind the same `SourceConnector` contract only where the vendor documents public access. Sanitized fixtures per ATS; the detector is pure and unit-tested against saved HTML.
+5. **JSON-LD generalization.** Replace the `JSON_LD_ALLOWED_HOSTS` environment allowlist with the per-company `crawl_strategy` gate, crawl the listing page for individual posting links up to a page cap, and read `applicantLocationRequirements`, `jobLocationType`, `baseSalary` and `validThrough`. Robots and terms are checked per company and recorded before the strategy is enabled.
+6. **Structured locations.** Add `job_locations`, the deterministic normalizer and confidence table from the location section, backfill existing jobs, and switch list filtering and hard constraints to structured rows with text fallback.
+7. **Saved API patterns.** For custom career sites, run Playwright inside an isolated worker container with no database credentials, record XHR/fetch requests that return job JSON, and save a `crawl_patterns` row with the URL template and request body. Later refreshes replay the pattern over plain HTTP; the browser runs again only when the pattern fails validation.
+8. **Browser crawler.** Where no pattern exists, use Crawlee with Playwright to open the careers page, select a country filter when present, paginate up to a cap, collect posting links and extract each posting through the JSON-LD, then HTML, extractor. Concurrency, request queue and rate limits come from Crawlee; robots and per-host budgets from the provider registry.
+9. **Bounded AI navigation.** Only for sites the crawler cannot map, send page URL, trimmed DOM outline, visible text, links, buttons and forms to the model and ask it to locate the openings list. The model returns a proposed action such as click, select or navigate; a browser controller validates the action against an allowlist of roles, same-host navigation and a step budget before Playwright executes it. Page content is data, never instructions. Each session records its transcript and cost against the monthly budget, and a successful map is saved as a pattern so the model is not consulted again.
+10. **Cross-source deduplication.** Extend the canonical identity from URL hash to a normalized company, title and location key with description similarity, so a posting mirrored on an ATS board and a company page becomes one job with two references.
+
+Verify each step with fixture-based unit tests, a real-database integration test, and an opt-in live test per new provider. Publicly reachable does not mean permitted to crawl: every enabled strategy records the policy check that allowed it.
 
 ### Phase 6 — application intelligence
 

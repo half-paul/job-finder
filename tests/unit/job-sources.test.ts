@@ -142,6 +142,52 @@ describe("Phase 2 source connectors", () => {
     });
   });
 
+  it("normalizes a multi-employer Jobicy feed and skips malformed rows", async () => {
+    const connector = createConnector("Jobicy", {
+      fetchImpl: jsonFetch({
+        jobs: [
+          {
+            id: 2166198,
+            url: "https://jobicy.com/jobs/2166198-director-platform",
+            jobTitle: "Director, Platform Engineering",
+            companyName: "Example Remote",
+            jobDescription: "<p>Lead a distributed platform team.</p>",
+            jobGeo: "Canada",
+            jobIndustry: ["Engineering"],
+            jobType: ["Full-Time"],
+            pubDate: "2026-09-12T16:00:10+00:00",
+            salaryMin: 180000,
+            salaryMax: 210000,
+            salaryCurrency: "CAD",
+            salaryPeriod: "yearly",
+          },
+          // Missing required title: skipped rather than failing the scan.
+          { id: 1, url: "https://jobicy.com/jobs/broken", companyName: "x" },
+        ],
+      }),
+    });
+    const query = { board: "jobicy", terms: [] };
+    const page = await connector.search(query);
+    expect(page.complete).toBe(true);
+    expect(page.canMarkRemovals).toBe(false);
+    expect(page.jobs).toHaveLength(1);
+    const raw = await connector.fetchJob(page.jobs[0]);
+    const normalized = await connector.normalize(raw, { query });
+    expect(normalized).toMatchObject({
+      provider: "Jobicy",
+      externalId: "2166198",
+      company: "Example Remote",
+      description: "Lead a distributed platform team.",
+      location: "Canada",
+      workType: "Remote",
+      employmentType: "Full-time",
+      salaryMin: 180000,
+      salaryMax: 210000,
+      salaryPeriod: "year",
+      currency: "CAD",
+    });
+  });
+
   it("allows JSON-LD only on configured hosts and normalizes schema data", async () => {
     const connector = createConnector("JSON-LD", {
       jsonLdAllowedHosts: ["example.com"],

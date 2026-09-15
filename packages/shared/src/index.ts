@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { countryCodes } from "./countries";
+export * from "./countries";
+export * from "./keywords";
 
 const short = z.string().trim().max(200);
 const list = z.array(short.min(1)).max(100);
@@ -143,6 +146,18 @@ export const preferencesSchema = z
     employmentTypes: z.array(z.enum(employmentTypes)).max(7),
     workTypes: z.array(z.enum(workTypes)).max(4),
     includedLocations: list,
+    countries: z
+      .array(
+        z
+          .string()
+          .refine((code) => countryCodes.has(code), "Choose a valid country"),
+      )
+      .max(249)
+      .default([]),
+    includeWorldwideJobs: z.boolean().default(true),
+    includeUnknownCountryJobs: z.boolean().default(false),
+    autoEvaluateAfterSync: z.boolean().default(true),
+    evaluationBatchSize: z.number().int().min(1).max(20).default(5),
     excludedLocations: list,
     excludedCompanies: list,
     preferredCompanies: list,
@@ -157,7 +172,8 @@ export const preferencesSchema = z
       )
       .max(100),
     industries: list,
-    negativeKeywords: list,
+    includeKeywords: list.default([]),
+    negativeKeywords: list.default([]),
     salaryMin: z.number().nonnegative().max(10000000).nullable(),
     salaryPreferred: z.number().nonnegative().max(10000000).nullable(),
     salaryMax: z.number().nonnegative().max(10000000).nullable(),
@@ -172,6 +188,12 @@ export const preferencesSchema = z
       seniority: z.boolean(),
       salary: z.boolean(),
     }),
+    aiMonthlyBudgetMicros: z
+      .number()
+      .int()
+      .min(0)
+      .max(100_000_000)
+      .default(250_000),
     weights: weightSchema,
   })
   .refine(
@@ -183,6 +205,11 @@ export const preferencesSchema = z
   );
 export type Preferences = z.infer<typeof preferencesSchema>;
 export const defaultPreferences: Preferences = {
+  countries: [],
+  includeWorldwideJobs: true,
+  includeUnknownCountryJobs: false,
+  autoEvaluateAfterSync: true,
+  evaluationBatchSize: 5,
   targetRoles: [],
   employmentTypes: ["Full-time", "Contract"],
   workTypes: ["Remote", "Hybrid"],
@@ -193,6 +220,7 @@ export const defaultPreferences: Preferences = {
   seniority: [],
   skills: [],
   industries: [],
+  includeKeywords: [],
   negativeKeywords: [],
   salaryMin: null,
   salaryPreferred: null,
@@ -208,6 +236,7 @@ export const defaultPreferences: Preferences = {
     seniority: true,
     salary: false,
   },
+  aiMonthlyBudgetMicros: 250_000,
   weights: defaultWeights,
 };
 export const httpUrl = z
@@ -257,6 +286,7 @@ export const actionSchema = z.object({
   status: z.enum(statusValues),
   notes: z.string().max(10000).default(""),
 });
+export const archiveSchema = z.object({ archived: z.boolean() });
 export const matchSchema = z.object({
   qualificationScore: z.number().min(0).max(100),
   interestScore: z.number().min(0).max(100),
@@ -272,13 +302,14 @@ const provider = z.enum([
   "Lever",
   "Ashby",
   "RemoteOK",
+  "Jobicy",
   "JSON-LD",
 ]);
 export const sourceInputSchema = z
   .object({
     provider,
     board: short.default(""),
-    company: short.min(1),
+    company: short.default(""),
     sourceUrl: httpUrl.optional(),
   })
   .refine(
@@ -286,7 +317,14 @@ export const sourceInputSchema = z
     "JSON-LD sources require a source URL",
   )
   .refine(
-    (v) => v.provider === "JSON-LD" || v.board.length > 0,
+    (v) =>
+      v.provider === "JSON-LD" ||
+      v.provider === "RemoteOK" ||
+      v.provider === "Jobicy" ||
+      v.board.length > 0,
     "Board/site name is required",
   );
 export type SourceInput = z.infer<typeof sourceInputSchema>;
+export const globalSourceProviders = ["RemoteOK", "Jobicy"] as const;
+export const isGlobalSource = (provider: string) =>
+  globalSourceProviders.some((value) => value === provider);

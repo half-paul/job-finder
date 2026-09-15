@@ -152,6 +152,16 @@ small {
   background: var(--accent-soft);
   color: var(--accent);
 }
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.archive-control {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+}
 .workspace {
   display: flex;
   min-height: 100vh;
@@ -316,6 +326,32 @@ small {
   display: flex;
   gap: 13px;
   align-items: center;
+}
+.sync-feedback {
+  padding: 18px 22px;
+  margin-bottom: 24px;
+  overflow-wrap: anywhere;
+}
+.country-selections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.sync-feedback p {
+  margin: 0 0 10px;
+}
+.sync-feedback details {
+  margin-bottom: 10px;
+}
+.sync-feedback ul {
+  max-height: 180px;
+  overflow-y: auto;
+}
+@media (max-width: 480px) {
+  .topbar .breadcrumb {
+    display: none;
+  }
 }
 .private-badge {
   font-size: 10px;
@@ -932,6 +968,13 @@ legend {
   justify-content: space-around;
   margin: 25px 0;
   font-size: 12px;
+}
+.match-evaluator {
+  margin-bottom: 18px;
+}
+.match-evaluator .success,
+.match-evaluator .error {
+  margin-top: 12px;
 }
 .match-scores strong {
   display: block;

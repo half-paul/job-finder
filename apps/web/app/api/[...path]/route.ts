@@ -6,8 +6,13 @@ import {
   preferences,
   resumes,
   auditEvents,
+  targetEmbeddings,
 } from "@jobfinder/db";
-import { profileSchema, preferencesSchema } from "@jobfinder/shared";
+import {
+  defaultPreferences,
+  profileSchema,
+  preferencesSchema,
+} from "@jobfinder/shared";
 import {
   authenticate,
   logout,
@@ -22,7 +27,14 @@ import {
   verifyOrigin,
 } from "../../../lib/http";
 import { createSource, listSources, scanSource } from "../../../lib/discovery";
-import { createJob, getJob, listJobs, updateStatus } from "../../../lib/jobs";
+import { evaluateJob, evaluateSyncedJobs } from "../../../lib/matching";
+import {
+  createJob,
+  getJob,
+  listJobs,
+  setArchived,
+  updateStatus,
+} from "../../../lib/jobs";
 import { extractResume, maxResumeBytes } from "../../../lib/resumes";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -50,6 +62,12 @@ async function handle(request: Request, context: Context) {
     }
     const user = await requireUser();
     const db = getDb();
+    if (route === "jobs/evaluation-batch" && method === "POST") {
+      await rateLimit(`ai-batch:${user.id}`, 20, 3600);
+      return Response.json(
+        await evaluateSyncedJobs(user.id, await readJson(request)),
+      );
+    }
     if (route === "sources" && method === "GET")
       return Response.json(await listSources(user.id));
     if (route === "sources" && method === "POST") {
@@ -76,10 +94,15 @@ async function handle(request: Request, context: Context) {
       }
       if (method === "PUT") {
         const data = profileSchema.parse(await readJson(request));
-        await db
-          .update(profiles)
-          .set({ data, updatedAt: new Date() })
-          .where(eq(profiles.userId, user.id));
+        await db.transaction(async (tx) => {
+          await tx
+            .update(profiles)
+            .set({ data, updatedAt: new Date() })
+            .where(eq(profiles.userId, user.id));
+          await tx
+            .delete(targetEmbeddings)
+            .where(eq(targetEmbeddings.userId, user.id));
+        });
         return Response.json(data);
       }
     }
@@ -89,14 +112,21 @@ async function handle(request: Request, context: Context) {
           .select()
           .from(preferences)
           .where(eq(preferences.userId, user.id));
-        return Response.json(row.data);
+        return Response.json(
+          preferencesSchema.parse(row?.data ?? defaultPreferences),
+        );
       }
       if (method === "PUT") {
         const data = preferencesSchema.parse(await readJson(request));
-        await db
-          .update(preferences)
-          .set({ data, updatedAt: new Date() })
-          .where(eq(preferences.userId, user.id));
+        await db.transaction(async (tx) => {
+          await tx
+            .update(preferences)
+            .set({ data, updatedAt: new Date() })
+            .where(eq(preferences.userId, user.id));
+          await tx
+            .delete(targetEmbeddings)
+            .where(eq(targetEmbeddings.userId, user.id));
+        });
         return Response.json(data);
       }
     }
@@ -205,9 +235,17 @@ async function handle(request: Request, context: Context) {
       const id = z.uuid().parse(path[1]);
       if (path.length === 2 && method === "GET")
         return Response.json(await getJob(user.id, id));
+      if (path.length === 3 && path[2] === "evaluate" && method === "POST") {
+        await rateLimit(`ai-evaluate:${user.id}`, 20, 3600);
+        return Response.json(await evaluateJob(user.id, id));
+      }
       if (path.length === 3 && path[2] === "status" && method === "PUT")
         return Response.json(
           await updateStatus(user.id, id, await readJson(request)),
+        );
+      if (path.length === 3 && path[2] === "archive" && method === "PUT")
+        return Response.json(
+          await setArchived(user.id, id, await readJson(request)),
         );
     }
     throw new HttpError(404, "Endpoint not found.");

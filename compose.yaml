@@ -25,6 +25,9 @@ services:
   web:
     build: .
     command: npm run start
+    env_file:
+      - path: .env.local
+        required: false
     environment:
       DATABASE_URL: postgresql://jobfinder:local-development-only@postgres:5432/jobfinder
       APP_ORIGIN: http://localhost:3000

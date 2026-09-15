@@ -1,23 +1,73 @@
 import "server-only";
-import { and, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
+import {
+  and,
+  desc,
+  eq,
+  ilike,
+  inArray,
+  isNotNull,
+  isNull,
+  or,
+  sql,
+} from "drizzle-orm";
 import {
   getDb,
   jobs,
   jobMatches,
   savedJobs,
   jobStatusHistory,
+  preferences,
 } from "@jobfinder/db";
-import { actionSchema, jobInputSchema } from "@jobfinder/shared";
+import {
+  actionSchema,
+  archiveSchema,
+  jobInputSchema,
+  preferencesSchema,
+  defaultPreferences,
+  matchesCountries,
+} from "@jobfinder/shared";
 import { canonicalUrl, digest } from "./security";
 import { HttpError } from "./http";
 export const visibleJob = (userId: string) =>
   or(isNull(jobs.ownerId), eq(jobs.ownerId, userId));
+
+/**
+ * Archived listings are excluded from every list, count and evaluation. They
+ * stay in the database so a later sync re-uses the canonical row instead of
+ * importing the same posting again.
+ */
+export const archivedJob = () => isNotNull(jobs.archivedAt);
+export const activeJob = () => isNull(jobs.archivedAt);
+
+async function countryCondition(userId: string) {
+  const db = getDb();
+  const [row] = await db
+    .select()
+    .from(preferences)
+    .where(eq(preferences.userId, userId));
+  const settings = preferencesSchema.parse(row?.data ?? defaultPreferences);
+  if (!settings.countries.length) return undefined;
+  // Resolve country names, codes and feed location labels before pagination.
+  // Fetch only location metadata, never every listing's full description.
+  const locations = await db
+    .select({ id: jobs.id, country: jobs.country, location: jobs.location })
+    .from(jobs)
+    .where(visibleJob(userId));
+  const allowed = locations
+    .filter((job) => matchesCountries(job, settings))
+    .map((job) => job.id);
+  return allowed.length ? inArray(jobs.id, allowed) : sql`false`;
+}
 export async function listJobs(userId: string, params: URLSearchParams) {
   const page = Math.max(1, Math.min(10000, Number(params.get("page")) || 1));
   const query = (params.get("q") ?? "")
     .slice(0, 200)
     .replace(/[\\%_]/g, "\\$&");
-  const conditions = [visibleJob(userId)];
+  const conditions = [
+    visibleJob(userId),
+    params.get("view") === "archived" ? archivedJob() : activeJob(),
+    await countryCondition(userId),
+  ];
   if (query)
     conditions.push(
       or(
@@ -123,21 +173,36 @@ export async function updateStatus(userId: string, id: string, body: unknown) {
   });
   return input;
 }
+export async function setArchived(userId: string, id: string, body: unknown) {
+  const input = archiveSchema.parse(body);
+  await getJob(userId, id);
+  const [job] = await getDb()
+    .update(jobs)
+    .set({
+      archivedAt: input.archived ? new Date() : null,
+      updatedAt: new Date(),
+    })
+    .where(eq(jobs.id, id))
+    .returning();
+  return job;
+}
 export async function dashboardCounts(userId: string) {
   const db = getDb();
+  const countries = await countryCondition(userId);
   const [counts] = await db
     .select({
       total: sql<number>`count(*)::int`,
       newToday: sql<number>`count(*) FILTER (WHERE ${jobs.discoveredAt} >= date_trunc('day', now()))::int`,
     })
     .from(jobs)
-    .where(visibleJob(userId));
+    .where(and(visibleJob(userId), activeJob(), countries));
   const [saved] = await db
     .select({
       saved: sql<number>`count(*) FILTER (WHERE status='Saved')::int`,
       applications: sql<number>`count(*) FILTER (WHERE status IN ('Applied','Interviewing','Offer','Preparing Application'))::int`,
     })
     .from(savedJobs)
-    .where(eq(savedJobs.userId, userId));
+    .innerJoin(jobs, eq(jobs.id, savedJobs.jobId))
+    .where(and(eq(savedJobs.userId, userId), activeJob(), countries));
   return { ...counts, ...saved };
 }

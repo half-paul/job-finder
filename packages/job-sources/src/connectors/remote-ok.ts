@@ -54,6 +54,7 @@ export function createRemoteOkConnector(
         });
       }
       return {
+        canMarkRemovals: false,
         jobs,
         next:
           response.etag || response.lastModified

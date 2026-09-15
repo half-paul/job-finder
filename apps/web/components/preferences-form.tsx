@@ -6,11 +6,14 @@ import {
   employmentTypes,
   seniorityLevels,
   workTypes,
+  countries,
+  preferencesSchema,
 } from "@jobfinder/shared";
 import { api } from "./client";
 import { Button } from "./ui/button";
 export function PreferencesForm({ initial }: { initial: Preferences }) {
-  const [data, setData] = useState(initial);
+  const [data, setData] = useState(() => preferencesSchema.parse(initial));
+  const [countryToAdd, setCountryToAdd] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -40,6 +43,7 @@ export function PreferencesForm({ initial }: { initial: Preferences }) {
               "excludedCompanies",
               "preferredCompanies",
               "industries",
+              "includeKeywords",
               "negativeKeywords",
             ] as const)
               clean[key] = clean[key].map((s) => s.trim()).filter(Boolean);
@@ -150,16 +154,8 @@ export function PreferencesForm({ initial }: { initial: Preferences }) {
             {(
               [
                 ["employmentTypes", "Employment type", employmentTypes],
-                [
-                  "workTypes",
-                  "Work arrangement",
-                  workTypes.filter((v) => v !== "Unknown"),
-                ],
-                [
-                  "seniority",
-                  "Seniority",
-                  seniorityLevels.filter((v) => v !== "Unknown"),
-                ],
+                ["workTypes", "Work arrangement", workTypes],
+                ["seniority", "Seniority", seniorityLevels],
               ] as const
             ).map(([key, label, values]) => (
               <fieldset key={key}>
@@ -186,6 +182,13 @@ export function PreferencesForm({ initial }: { initial: Preferences }) {
                     </label>
                   ))}
                 </div>
+                {(key === "workTypes" || key === "seniority") && (
+                  <small>
+                    Postings that do not state this are still evaluated.
+                    Selecting Unknown also tells the AI an unstated value is
+                    acceptable.
+                  </small>
+                )}
               </fieldset>
             ))}
             <label className="check-label">
@@ -211,6 +214,78 @@ export function PreferencesForm({ initial }: { initial: Preferences }) {
           </section>
           <section className="panel form-panel">
             <h2>Places and companies</h2>
+            <label>
+              Add a country
+              <select
+                value={countryToAdd}
+                onChange={(event) => setCountryToAdd(event.target.value)}
+              >
+                <option value="">Choose a country</option>
+                {countries
+                  .filter(({ code }) => !data.countries.includes(code))
+                  .map(({ code, name }) => (
+                    <option value={code} key={code}>
+                      {name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!countryToAdd}
+              onClick={() => {
+                update("countries", [...data.countries, countryToAdd]);
+                setCountryToAdd("");
+              }}
+            >
+              <Plus size={16} />
+              Add country
+            </Button>
+            <div className="country-selections">
+              {data.countries.map((code) => (
+                <Button
+                  type="button"
+                  variant="outline"
+                  key={code}
+                  aria-label={`Remove ${countries.find((country) => country.code === code)?.name}`}
+                  onClick={() =>
+                    update(
+                      "countries",
+                      data.countries.filter((value) => value !== code),
+                    )
+                  }
+                >
+                  {countries.find((country) => country.code === code)?.name}
+                  <X size={14} />
+                </Button>
+              ))}
+            </div>
+            <p className="muted">
+              No countries selected means all countries. Otherwise, jobs outside
+              your selection are hidden and excluded from evaluation. Remote
+              jobs still need matching location eligibility.
+            </p>
+            <label className="check-label">
+              <input
+                type="checkbox"
+                checked={data.includeWorldwideJobs}
+                onChange={(event) =>
+                  update("includeWorldwideJobs", event.target.checked)
+                }
+              />
+              Include jobs available worldwide
+            </label>
+            <label className="check-label">
+              <input
+                type="checkbox"
+                checked={data.includeUnknownCountryJobs}
+                onChange={(event) =>
+                  update("includeUnknownCountryJobs", event.target.checked)
+                }
+              />
+              Include jobs with unknown countries
+            </label>
             {(
               [
                 ["includedLocations", "Included locations"],
@@ -218,7 +293,8 @@ export function PreferencesForm({ initial }: { initial: Preferences }) {
                 ["preferredCompanies", "Preferred companies"],
                 ["excludedCompanies", "Excluded companies"],
                 ["industries", "Preferred industries"],
-                ["negativeKeywords", "Discouraged roles or keywords"],
+                ["includeKeywords", "Required keywords for importing"],
+                ["negativeKeywords", "Keywords that block importing"],
               ] as const
             ).map(([key, label]) => (
               <label key={key}>
@@ -235,6 +311,14 @@ export function PreferencesForm({ initial }: { initial: Preferences }) {
                 <small>Separate entries with commas.</small>
               </label>
             ))}
+            <p className="muted">
+              Discovered listings are imported only when they mention at least
+              one required keyword, and never when they contain a blocking
+              keyword. Matching ignores case and extra spaces. Leave the
+              required list empty to import every listing, and archive
+              opportunities you have already reviewed. Opportunities you add
+              yourself are always kept.
+            </p>
           </section>
         </div>
         <section className="panel form-panel">
@@ -427,9 +511,57 @@ export function PreferencesForm({ initial }: { initial: Preferences }) {
           </section>
           <section className="panel form-panel">
             <h2>How you weigh a match</h2>
+            <label className="check-label">
+              <input
+                type="checkbox"
+                checked={data.autoEvaluateAfterSync}
+                onChange={(event) =>
+                  update("autoEvaluateAfterSync", event.target.checked)
+                }
+              />
+              Evaluate jobs automatically after syncing
+            </label>
+            <label>
+              Jobs to evaluate per sync
+              <input
+                type="number"
+                required
+                min={1}
+                max={20}
+                value={data.evaluationBatchSize}
+                onChange={(event) =>
+                  update("evaluationBatchSize", Number(event.target.value))
+                }
+              />
+              <small>
+                Default: 5. Evaluate up to this many eligible new or changed
+                jobs after each sync, one at a time. Your monthly AI budget
+                still applies.
+              </small>
+            </label>
             <p className="muted">
-              Configure the future matching engine. Weights must total 100.
+              Configure AI matching. Weights must total 100.
             </p>
+            <label>
+              Monthly AI budget (USD)
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step={0.01}
+                value={(data.aiMonthlyBudgetMicros ?? 250000) / 1_000_000}
+                onChange={(e) =>
+                  update(
+                    "aiMonthlyBudgetMicros",
+                    Math.round(Number(e.target.value) * 1_000_000),
+                  )
+                }
+              />
+              <small>
+                Evaluations are rejected before an AI request if the estimated
+                cost would exceed this monthly budget.
+              </small>
+            </label>
             {(
               Object.keys(data.weights) as (keyof Preferences["weights"])[]
             ).map((key) => (

@@ -11,7 +11,7 @@ import {
 export * from "./transport";
 
 export type SourceProvider =
-  "Greenhouse" | "Lever" | "Ashby" | "RemoteOK" | "JSON-LD";
+  "Greenhouse" | "Lever" | "Ashby" | "RemoteOK" | "Jobicy" | "JSON-LD";
 
 export interface SearchQuery {
   board: string;
@@ -36,6 +36,7 @@ export interface JobReference {
 }
 
 export interface DiscoveredPage {
+  canMarkRemovals?: boolean;
   jobs: JobReference[];
   next?: SearchCursor;
   complete: boolean;
@@ -142,6 +143,7 @@ export function providerName(value: string): SourceProvider {
   if (normalized === "remoteok" || normalized === "remote-ok")
     return "RemoteOK";
   if (normalized === "json-ld" || normalized === "jsonld") return "JSON-LD";
+  if (normalized === "jobicy") return "Jobicy";
   throw new Error("Unsupported source provider");
 }
 
@@ -160,6 +162,8 @@ export function createConnector(
       return createRemoteOkConnector(options);
     case "JSON-LD":
       return createJsonLdConnector(options);
+    case "Jobicy":
+      return createJobicyConnector(options);
   }
 }
 
@@ -169,6 +173,7 @@ import {
   createJsonLdConnector,
   createLeverConnector,
   createRemoteOkConnector,
+  createJobicyConnector,
 } from "./connectors";
 
 export {
@@ -177,4 +182,5 @@ export {
   createJsonLdConnector,
   createLeverConnector,
   createRemoteOkConnector,
+  createJobicyConnector,
 };

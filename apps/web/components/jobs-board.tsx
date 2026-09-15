@@ -1,17 +1,21 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ArrowUpRight,
+  Archive,
   BriefcaseBusiness,
   Search,
   SlidersHorizontal,
   Plus,
   Bookmark,
   ArrowRight,
+  Undo2,
 } from "lucide-react";
 import type { listJobs } from "../lib/jobs";
 import { Button } from "./ui/button";
+import { api } from "./client";
 import { salary } from "../lib/display";
 type Result = Awaited<ReturnType<typeof listJobs>>;
 export function JobsBoard({
@@ -21,6 +25,8 @@ export function JobsBoard({
   initial: Result;
   view?: string;
 }) {
+  const router = useRouter();
+  const archivedView = view === "archived";
   const [data, setData] = useState(initial);
   const [query, setQuery] = useState("");
   const [work, setWork] = useState("");
@@ -28,7 +34,29 @@ export function JobsBoard({
   const [sort, setSort] = useState("best");
   const [page, setPage] = useState(1);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [refresh, setRefresh] = useState(0);
   const [loading, setLoading] = useState(false);
+  async function setArchived(id: string, archived: boolean) {
+    setBusyId(id);
+    setError("");
+    setMessage("");
+    try {
+      await api(`jobs/${id}/archive`, "PUT", { archived });
+      setMessage(
+        archived
+          ? "Opportunity archived. It is hidden from your counts and lists."
+          : "Opportunity restored to your workspace.",
+      );
+      setRefresh((value) => value + 1);
+      router.refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  }
   useEffect(() => {
     const abort = new AbortController();
     const timer = setTimeout(async () => {
@@ -59,19 +87,37 @@ export function JobsBoard({
       clearTimeout(timer);
       abort.abort();
     };
-  }, [query, work, score, sort, view, page]);
+  }, [query, work, score, sort, view, page, initial, refresh]);
+  const filtered = Boolean(query || work || score !== "0");
+  const emptyHeading = filtered
+    ? archivedView
+      ? "No archived opportunities match these filters"
+      : "No opportunities match these filters"
+    : archivedView
+      ? "Nothing archived yet"
+      : view === "saved"
+        ? "Make room for the possibilities"
+        : view === "applications"
+          ? "Your next chapter starts with a first step"
+          : "A clear view of what comes next";
   return (
     <section className="panel opportunities">
       <div className="panel-heading">
         <div>
           <h2>
-            {view === "saved"
-              ? "Your shortlist"
-              : view === "applications"
-                ? "Application pipeline"
-                : "Your opportunities"}
+            {archivedView
+              ? "Archived opportunities"
+              : view === "saved"
+                ? "Your shortlist"
+                : view === "applications"
+                  ? "Application pipeline"
+                  : "Your opportunities"}
           </h2>
-          <p>Keep the right possibilities in view.</p>
+          <p>
+            {archivedView
+              ? "Set aside, out of your counts, and never imported again."
+              : "Keep the right possibilities in view."}
+          </p>
         </div>
         <Button asChild variant="outline">
           <Link href="/jobs/new">
@@ -146,6 +192,11 @@ export function JobsBoard({
           {error}
         </p>
       )}
+      {message && (
+        <p role="status" className="success">
+          {message}
+        </p>
+      )}
       {data.items.length ? (
         <div className="table-scroll">
           <table>
@@ -195,13 +246,32 @@ export function JobsBoard({
                     <span className="tag">{state || "Discovered"}</span>
                   </td>
                   <td>
-                    <Link
-                      className="icon-button"
-                      aria-label={`View ${job.title}`}
-                      href={`/jobs/${job.id}`}
-                    >
-                      <ArrowUpRight size={17} />
-                    </Link>
+                    <div className="row-actions">
+                      <Link
+                        className="icon-button"
+                        aria-label={`View ${job.title}`}
+                        href={`/jobs/${job.id}`}
+                      >
+                        <ArrowUpRight size={17} />
+                      </Link>
+                      <button
+                        type="button"
+                        className="icon-button"
+                        disabled={busyId === job.id}
+                        aria-label={
+                          archivedView
+                            ? `Restore ${job.title}`
+                            : `Archive ${job.title}`
+                        }
+                        onClick={() => void setArchived(job.id, !archivedView)}
+                      >
+                        {archivedView ? (
+                          <Undo2 size={17} />
+                        ) : (
+                          <Archive size={17} />
+                        )}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -211,33 +281,31 @@ export function JobsBoard({
       ) : (
         <div className="empty-state">
           <span className="empty-icon">
-            {view === "saved" ? (
+            {archivedView ? (
+              <Archive size={25} />
+            ) : view === "saved" ? (
               <Bookmark size={25} />
             ) : (
               <BriefcaseBusiness size={25} />
             )}
           </span>
-          <h3>
-            {query || work || score !== "0"
-              ? "No opportunities match these filters"
-              : view === "saved"
-                ? "Make room for the possibilities"
-                : view === "applications"
-                  ? "Your next chapter starts with a first step"
-                  : "A clear view of what comes next"}
-          </h3>
+          <h3>{emptyHeading}</h3>
           <p>
-            {view === "saved"
-              ? "Save opportunities from a job's detail page to build your shortlist."
-              : view === "applications"
-                ? "Update an opportunity to Applied or Interviewing to track it here."
-                : "Add an opportunity you’re considering. Your private workspace will keep the details and your next steps together."}
+            {archivedView
+              ? "Archive an opportunity from this list or its detail page. Archived opportunities stay out of your counts and lists, and future syncs will not import them again."
+              : view === "saved"
+                ? "Save opportunities from a job's detail page to build your shortlist."
+                : view === "applications"
+                  ? "Update an opportunity to Applied or Interviewing to track it here."
+                  : "Add an opportunity you’re considering. Your private workspace will keep the details and your next steps together."}
           </p>
           <Button asChild variant="outline">
             <Link href={view === "all" ? "/jobs/new" : "/jobs"}>
-              {view === "all"
-                ? "Add your first opportunity"
-                : "Explore opportunities"}
+              {archivedView
+                ? "Browse opportunities"
+                : view === "all"
+                  ? "Add your first opportunity"
+                  : "Explore opportunities"}
               <ArrowRight size={16} />
             </Link>
           </Button>
@@ -245,7 +313,9 @@ export function JobsBoard({
       )}
       <div className="table-footer">
         <span>
-          AI evaluation and automatic discovery arrive in the next phases.
+          {archivedView
+            ? "Archived opportunities are excluded from counts, lists and automatic evaluation until you restore them."
+            : "Filter by match score, work arrangement or keyword to focus your list."}
         </span>
         <div>
           <button

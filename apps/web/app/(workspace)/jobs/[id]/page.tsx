@@ -12,6 +12,8 @@ import { getJob } from "../../../../lib/jobs";
 import { HttpError } from "../../../../lib/http";
 import { salary } from "../../../../lib/display";
 import { JobActions } from "../../../../components/job-actions";
+import { JobArchive } from "../../../../components/job-archive";
+import { MatchEvaluator } from "../../../../components/match-evaluator";
 import { Button } from "../../../../components/ui/button";
 export default async function Page({
   params,
@@ -72,6 +74,7 @@ export default async function Page({
           </section>
           <section className="panel form-panel">
             <h2>Your match</h2>
+            <MatchEvaluator jobId={id} evaluated={Boolean(match)} />
             {match ? (
               <>
                 <div className="match-scores">
@@ -102,8 +105,9 @@ export default async function Page({
               </>
             ) : (
               <p className="muted">
-                This opportunity has not been evaluated. Semantic matching and
-                explainable scores will be available in Phase 3.
+                This opportunity has not been evaluated yet. AI evaluation uses
+                your private profile and explicit preferences, and hard
+                requirements are checked first.
               </p>
             )}
           </section>
@@ -116,6 +120,10 @@ export default async function Page({
               status={state?.status ?? "Discovered"}
               notes={state?.notes ?? ""}
             />
+          </section>
+          <section className="panel form-panel">
+            <h2>Archive</h2>
+            <JobArchive id={id} archived={Boolean(job.archivedAt)} />
           </section>
           <section className="panel form-panel">
             <h2>Opportunity timeline</h2>
@@ -149,7 +157,11 @@ export default async function Page({
                 </li>
               )}
             </ol>
-            <p className="muted">Listing status: {job.lifecycle}</p>
+            <p className="muted">
+              Listing status: {job.lifecycle}
+              {job.archivedAt &&
+                ` · Archived ${job.archivedAt.toLocaleDateString("en-CA", { timeZone: "UTC" })}`}
+            </p>
           </section>
         </aside>
       </div>
