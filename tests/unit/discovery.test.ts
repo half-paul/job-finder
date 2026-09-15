@@ -341,3 +341,72 @@ describe("Phase 5 careers URL finder", () => {
     expect(page).toBeNull();
   });
 });
+
+import { readFileSync } from "node:fs";
+import { detectAts } from "@jobfinder/discovery";
+
+const fixture = (name: string) =>
+  readFileSync(
+    new URL(`../fixtures/discovery/ats/${name}`, import.meta.url),
+    "utf8",
+  );
+
+describe("Phase 5 ATS detector", () => {
+  const at = (href: string, html: string, chain = [href]) =>
+    detectAts({ finalUrl: new URL(href), chain, html });
+
+  it("finds Greenhouse embeds, Lever links and Ashby iframes with their keys", () => {
+    expect(
+      at("https://acme.example/careers", fixture("greenhouse-embed.html")),
+    ).toEqual({
+      ats: "Greenhouse",
+      key: "acmecorp",
+    });
+    expect(
+      at("https://acme.example/careers", fixture("lever-link.html")),
+    ).toEqual({
+      ats: "Lever",
+      key: "acme-labs",
+    });
+    expect(
+      at("https://acme.example/careers", fixture("ashby-iframe.html")),
+    ).toEqual({
+      ats: "Ashby",
+      key: "acme",
+    });
+  });
+
+  it("reads the redirect chain and recognises unsupported vendors", () => {
+    expect(
+      at(
+        "https://acme.wd5.myworkdayjobs.com/en-US/External",
+        fixture("workday-redirect.html"),
+        [
+          "https://acme.example/careers",
+          "https://acme.wd5.myworkdayjobs.com/en-US/External",
+        ],
+      ),
+    ).toEqual({ ats: "Workday", key: "acme" });
+    expect(at("https://jobs.smartrecruiters.com/AcmeInc/", "<p>x</p>")).toEqual(
+      { ats: "SmartRecruiters", key: "AcmeInc" },
+    );
+    expect(at("https://careers-acme.icims.com/jobs/intro", "<p>x</p>")).toEqual(
+      {
+        ats: "iCIMS",
+        key: "careers-acme",
+      },
+    );
+    expect(
+      at("https://acme.taleo.net/careersection/2/jobsearch.ftl", "<p>x</p>"),
+    ).toEqual({
+      ats: "Taleo",
+      key: "acme",
+    });
+  });
+
+  it("returns null for a plain careers page", () => {
+    expect(
+      at("https://acme.example/careers", "<a href='/jobs/1'>Engineer</a>"),
+    ).toBeNull();
+  });
+});
