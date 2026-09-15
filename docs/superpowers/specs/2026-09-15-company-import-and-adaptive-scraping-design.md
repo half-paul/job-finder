@@ -53,43 +53,43 @@ New tables, both in `packages/db/src/schema.ts` with generated SQL committed.
 
 ### company_candidates
 
-| column | type | notes |
-| --- | --- | --- |
-| id | uuid pk | |
-| user_id | uuid fk users cascade | |
-| watchlist_id | uuid fk company_watchlists set null | entry created at import |
-| name | text | as given, or domain when absent |
-| domain | text | registrable domain, lowercase |
-| origin | text | `seed` only this round |
-| status | text | `Pending`, `Resolving`, `Resolved`, `NoCareersPage`, `Unsupported`, `Blocked`, `Failed` |
-| careers_url | text null | resolved page |
-| ats | text null | `Greenhouse`, `Lever`, `Ashby`, `Workday`, `SmartRecruiters`, `iCIMS`, `Taleo` |
-| ats_key | text null | board or tenant key |
-| strategy | text | `none`, `ats`, `json-ld`, `captured-api`, `browser` |
-| source_id | uuid fk job_sources set null | the source this candidate produced |
-| policy_check | jsonb | `{ robotsAllowed, robotsUrl, checkedAt, userAgent }` |
-| error | text | last failure, plain language |
-| attempts | integer | resolve attempts |
-| last_checked_at, next_check_at | timestamptz | |
-| created_at, updated_at | timestamptz | |
+| column                         | type                                | notes                                                                                   |
+| ------------------------------ | ----------------------------------- | --------------------------------------------------------------------------------------- |
+| id                             | uuid pk                             |                                                                                         |
+| user_id                        | uuid fk users cascade               |                                                                                         |
+| watchlist_id                   | uuid fk company_watchlists set null | entry created at import                                                                 |
+| name                           | text                                | as given, or domain when absent                                                         |
+| domain                         | text                                | registrable domain, lowercase                                                           |
+| origin                         | text                                | `seed` only this round                                                                  |
+| status                         | text                                | `Pending`, `Resolving`, `Resolved`, `NoCareersPage`, `Unsupported`, `Blocked`, `Failed` |
+| careers_url                    | text null                           | resolved page                                                                           |
+| ats                            | text null                           | `Greenhouse`, `Lever`, `Ashby`, `Workday`, `SmartRecruiters`, `iCIMS`, `Taleo`          |
+| ats_key                        | text null                           | board or tenant key                                                                     |
+| strategy                       | text                                | `none`, `ats`, `json-ld`, `captured-api`, `browser`                                     |
+| source_id                      | uuid fk job_sources set null        | the source this candidate produced                                                      |
+| policy_check                   | jsonb                               | `{ robotsAllowed, robotsUrl, checkedAt, userAgent }`                                    |
+| error                          | text                                | last failure, plain language                                                            |
+| attempts                       | integer                             | resolve attempts                                                                        |
+| last_checked_at, next_check_at | timestamptz                         |                                                                                         |
+| created_at, updated_at         | timestamptz                         |                                                                                         |
 
 Unique on (`user_id`, `domain`). Index on (`status`, `next_check_at`).
 
 ### crawl_patterns
 
-| column | type | notes |
-| --- | --- | --- |
-| id | uuid pk | |
-| source_id | uuid fk job_sources cascade | one active pattern per source |
-| kind | text | `http-json` only this round |
-| url_template | text | absolute HTTPS URL; may contain `{page}` |
-| method | text | `GET` or `POST` |
-| headers | jsonb | allowlisted request headers only (`accept`, `content-type`, `x-requested-with`) |
-| body | jsonb null | POST body, may contain `{page}` |
-| jobs_path | text | JSON pointer to the array of postings |
-| field_map | jsonb | `{ title, url, id, location, description, postedAt }` each a JSON pointer relative to a posting |
-| discovered_at, last_verified_at | timestamptz | |
-| failures | integer | consecutive replay failures |
+| column                          | type                        | notes                                                                                           |
+| ------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------- |
+| id                              | uuid pk                     |                                                                                                 |
+| source_id                       | uuid fk job_sources cascade | one active pattern per source                                                                   |
+| kind                            | text                        | `http-json` only this round                                                                     |
+| url_template                    | text                        | absolute HTTPS URL; may contain `{page}`                                                        |
+| method                          | text                        | `GET` or `POST`                                                                                 |
+| headers                         | jsonb                       | allowlisted request headers only (`accept`, `content-type`, `x-requested-with`)                 |
+| body                            | jsonb null                  | POST body, may contain `{page}`                                                                 |
+| jobs_path                       | text                        | JSON pointer to the array of postings                                                           |
+| field_map                       | jsonb                       | `{ title, url, id, location, description, postedAt }` each a JSON pointer relative to a posting |
+| discovered_at, last_verified_at | timestamptz                 |                                                                                                 |
+| failures                        | integer                     | consecutive replay failures                                                                     |
 
 ### job_sources
 
@@ -202,6 +202,7 @@ Unchanged. `scan.ts` applies `keywordFilter(normalized, settings)` to every post
 ## Testing
 
 Unit (`tests/unit`, offline, fixtures under `tests/fixtures/discovery`):
+
 - seed list parser: paste formats, CSV headers, suffix reduction, rejects, limits.
 - robots parser: allow, disallow, agent precedence, missing file.
 - careers link scorer and probe order.
@@ -211,6 +212,7 @@ Unit (`tests/unit`, offline, fixtures under `tests/fixtures/discovery`):
 - resolver ladder ordering with injected transport results: ATS wins over JSON-LD, JSON-LD over capture, capture over browser, robots block short-circuits.
 
 Real database (`tests/e2e`):
+
 - import endpoint: dedupe, watchlist linkage, authorization scoping between two synthetic users.
 - resolver handler with injected fetch and fake crawler producing each terminal status.
 - scan of a `CapturedApi` and a `Browser` source with fakes, asserting keyword gate counts and removal behaviour.
