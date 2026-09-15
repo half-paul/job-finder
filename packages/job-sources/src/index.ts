@@ -11,7 +11,15 @@ import {
 export * from "./transport";
 
 export type SourceProvider =
-  "Greenhouse" | "Lever" | "Ashby" | "RemoteOK" | "Jobicy" | "JSON-LD";
+  | "Greenhouse"
+  | "Lever"
+  | "Ashby"
+  | "RemoteOK"
+  | "Jobicy"
+  | "JSON-LD"
+  | "Careers"
+  | "CapturedApi"
+  | "Browser";
 
 export interface SearchQuery {
   board: string;
@@ -144,6 +152,10 @@ export function providerName(value: string): SourceProvider {
     return "RemoteOK";
   if (normalized === "json-ld" || normalized === "jsonld") return "JSON-LD";
   if (normalized === "jobicy") return "Jobicy";
+  if (normalized === "careers") return "Careers";
+  if (normalized === "capturedapi" || normalized === "captured-api")
+    return "CapturedApi";
+  if (normalized === "browser") return "Browser";
   throw new Error("Unsupported source provider");
 }
 
@@ -164,11 +176,18 @@ export function createConnector(
       return createJsonLdConnector(options);
     case "Jobicy":
       return createJobicyConnector(options);
+    case "Careers":
+      return createCareersConnector(options);
+    case "CapturedApi":
+      throw new Error("Not implemented");
+    case "Browser":
+      throw new Error("Not implemented");
   }
 }
 
 import {
   createAshbyConnector,
+  createCareersConnector,
   createGreenhouseConnector,
   createJsonLdConnector,
   createLeverConnector,
@@ -178,9 +197,18 @@ import {
 
 export {
   createAshbyConnector,
+  createCareersConnector,
   createGreenhouseConnector,
   createJsonLdConnector,
   createLeverConnector,
   createRemoteOkConnector,
   createJobicyConnector,
 };
+export * from "./posting-links";
+export {
+  extractJsonLdJobs,
+  jsonLdExternalId,
+  normalizeJsonLdJob,
+  jsonLdJobSchema,
+  type JsonLdJob,
+} from "./connectors/json-ld";

@@ -1,4 +1,5 @@
 export { createAshbyConnector } from "./ashby";
+export { createCareersConnector } from "./careers";
 export { createGreenhouseConnector } from "./greenhouse";
 export { createJsonLdConnector } from "./json-ld";
 export { createLeverConnector } from "./lever";

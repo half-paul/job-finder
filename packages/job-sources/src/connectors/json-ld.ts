@@ -9,35 +9,73 @@ import {
   retryAfterMs,
   SourceHttpError,
   type ConnectorOptions,
+  type NormalizeContext,
+  type NormalizedJob,
   type SourceConnector,
+  type SourceProvider,
 } from "../index";
 
-const rawJob = z.object({
+const addressSchema = z.object({
+  addressLocality: z.string().optional(),
+  addressRegion: z.string().optional(),
+  addressCountry: z
+    .union([z.string(), z.object({ name: z.string().optional() })])
+    .optional(),
+});
+
+export const jsonLdJobSchema = z.object({
   "@type": z.literal("JobPosting"),
   title: z.string(),
   description: z.string(),
   url: z.string(),
-  identifier: z.union([z.string(), z.number()]).nullable().optional(),
+  identifier: z
+    .union([
+      z.string(),
+      z.number(),
+      z.object({ value: z.union([z.string(), z.number()]).optional() }),
+    ])
+    .nullable()
+    .optional(),
   datePosted: z.string().optional().nullable(),
-  employmentType: z.string().optional().default(""),
+  validThrough: z.string().optional().nullable(),
+  employmentType: z
+    .union([z.string(), z.array(z.string())])
+    .optional()
+    .default(""),
+  jobLocationType: z.string().optional().nullable(),
   hiringOrganization: z.object({ name: z.string().optional() }).optional(),
   jobLocation: z
+    .union([
+      z.object({ address: addressSchema.optional() }),
+      z.array(z.object({ address: addressSchema.optional() })),
+    ])
+    .nullable()
+    .optional(),
+  applicantLocationRequirements: z
+    .union([
+      z.object({ name: z.string().optional() }),
+      z.array(z.object({ name: z.string().optional() })),
+    ])
+    .nullable()
+    .optional(),
+  baseSalary: z
     .object({
-      address: z
+      currency: z.string().optional(),
+      value: z
         .object({
-          addressLocality: z.string().optional(),
-          addressRegion: z.string().optional(),
-          addressCountry: z.string().optional(),
+          value: z.union([z.number(), z.string()]).optional(),
+          minValue: z.union([z.number(), z.string()]).optional(),
+          maxValue: z.union([z.number(), z.string()]).optional(),
+          unitText: z.string().optional(),
         })
         .optional(),
     })
     .nullable()
     .optional(),
 });
+export type JsonLdJob = z.infer<typeof jsonLdJobSchema>;
 
-type JsonLdJob = z.infer<typeof rawJob>;
-
-function extractJobs(html: string): JsonLdJob[] {
+export function extractJsonLdJobs(html: string): JsonLdJob[] {
   const jobs: JsonLdJob[] = [];
   const scripts =
     html.match(
@@ -57,7 +95,7 @@ function extractJobs(html: string): JsonLdJob[] {
           ? (parsed as { "@graph": unknown[] })["@graph"]
           : [parsed];
       for (const node of nodes) {
-        const job = rawJob.safeParse(node);
+        const job = jsonLdJobSchema.safeParse(node);
         if (job.success) jobs.push(job.data);
       }
     } catch {
@@ -65,6 +103,120 @@ function extractJobs(html: string): JsonLdJob[] {
     }
   }
   return jobs;
+}
+
+export function jsonLdExternalId(job: JsonLdJob): string {
+  const id = job.identifier;
+  if (typeof id === "string" || typeof id === "number") return String(id);
+  if (id && typeof id === "object" && id.value !== undefined)
+    return String(id.value);
+  return job.url;
+}
+
+const toInt = (value: number | string | undefined) => {
+  if (value === undefined) return null;
+  const parsed = Math.round(Number(String(value).replace(/[^0-9.]/g, "")));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+};
+
+const currencyOf = (
+  value: string | undefined,
+): "CAD" | "USD" | "EUR" | "GBP" | "Unknown" => {
+  const upper = (value ?? "").toUpperCase();
+  return upper === "CAD" ||
+    upper === "USD" ||
+    upper === "EUR" ||
+    upper === "GBP"
+    ? upper
+    : "Unknown";
+};
+
+const periodOf = (unit: string | undefined) => {
+  const upper = (unit ?? "").toUpperCase();
+  if (upper === "YEAR") return "year" as const;
+  if (upper === "MONTH") return "month" as const;
+  if (upper === "WEEK") return "week" as const;
+  if (upper === "DAY") return "day" as const;
+  if (upper === "HOUR") return "hour" as const;
+  return "unknown" as const;
+};
+
+/** Shared by the allowlisted JSON-LD connector and the per-company Careers connector. */
+export function normalizeJsonLdJob(
+  raw: JsonLdJob,
+  context: NormalizeContext,
+  provider: SourceProvider,
+): NormalizedJob {
+  const description = htmlToText(raw.description);
+  const locations = Array.isArray(raw.jobLocation)
+    ? raw.jobLocation
+    : raw.jobLocation
+      ? [raw.jobLocation]
+      : [];
+  const address = locations[0]?.address;
+  const country =
+    typeof address?.addressCountry === "string"
+      ? address.addressCountry
+      : (address?.addressCountry?.name ?? "");
+  const requirements = Array.isArray(raw.applicantLocationRequirements)
+    ? raw.applicantLocationRequirements
+    : raw.applicantLocationRequirements
+      ? [raw.applicantLocationRequirements]
+      : [];
+  const applicantCountries = requirements
+    .map((r) => r.name)
+    .filter((n): n is string => Boolean(n));
+  const location = [
+    [address?.addressLocality, address?.addressRegion]
+      .filter(Boolean)
+      .join(", "),
+    applicantCountries.length
+      ? `Applicants: ${applicantCountries.join(", ")}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const employment = Array.isArray(raw.employmentType)
+    ? raw.employmentType.join(" ")
+    : raw.employmentType;
+  const remote =
+    /TELECOMMUTE/i.test(raw.jobLocationType ?? "") ||
+    /remote/i.test(`${raw.title} ${description}`);
+  const salary = raw.baseSalary?.value;
+  const single = toInt(salary?.value);
+  const input = jobInputSchema.parse({
+    title: raw.title,
+    company:
+      raw.hiringOrganization?.name ||
+      context.query.company ||
+      context.query.board,
+    description,
+    location,
+    country,
+    industry: "",
+    employmentType: /contract/i.test(employment)
+      ? "Contract"
+      : /part|temp/i.test(employment)
+        ? "Temporary"
+        : /full/i.test(employment)
+          ? "Full-time"
+          : "Unknown",
+    seniority: "Unknown",
+    workType: remote ? "Remote" : "Unknown",
+    salaryMin: toInt(salary?.minValue) ?? single,
+    salaryMax: toInt(salary?.maxValue) ?? single,
+    salaryPeriod: periodOf(salary?.unitText),
+    currency: currencyOf(raw.baseSalary?.currency),
+    jobUrl: raw.url,
+    postedAt: isoDate(raw.datePosted),
+  });
+  return {
+    ...input,
+    externalId: jsonLdExternalId(raw),
+    provider,
+    sourceUrl: raw.url,
+    descriptionHash: descriptionDigest(description),
+  };
 }
 
 export function createJsonLdConnector(
@@ -101,10 +253,10 @@ export function createJsonLdConnector(
           response.status,
           retryAfterMs(response.headers.get("retry-after")),
         );
-      const jobs = extractJobs(text);
+      const jobs = extractJsonLdJobs(text);
       return {
         jobs: jobs.map((job) => {
-          const externalId = job.identifier ? String(job.identifier) : job.url;
+          const externalId = jsonLdExternalId(job);
           cache.set(externalId, job);
           return {
             externalId,
@@ -142,55 +294,16 @@ export function createJsonLdConnector(
           response.status,
           retryAfterMs(response.headers.get("retry-after")),
         );
-      const job = extractJobs(text).find(
+      const job = extractJsonLdJobs(text).find(
         (candidate) =>
-          String(candidate.identifier ?? "") === reference.externalId ||
+          jsonLdExternalId(candidate) === reference.externalId ||
           candidate.url === reference.externalId,
       );
       if (!job) throw new Error("JSON-LD job is no longer present");
       return job;
     },
     async normalize(raw, context) {
-      const description = htmlToText(raw.description);
-      const address = raw.jobLocation?.address;
-      const location = [address?.addressLocality, address?.addressRegion]
-        .filter(Boolean)
-        .join(", ");
-      const input = jobInputSchema.parse({
-        title: raw.title,
-        company:
-          raw.hiringOrganization?.name ||
-          context.query.company ||
-          context.query.board,
-        description,
-        location,
-        country: address?.addressCountry ?? "",
-        industry: "",
-        employmentType: /contract/i.test(raw.employmentType)
-          ? "Contract"
-          : /part/i.test(raw.employmentType)
-            ? "Temporary"
-            : /full/i.test(raw.employmentType)
-              ? "Full-time"
-              : "Unknown",
-        seniority: "Unknown",
-        workType: /remote/i.test(`${raw.title} ${description}`)
-          ? "Remote"
-          : "Unknown",
-        salaryMin: null,
-        salaryMax: null,
-        salaryPeriod: "unknown",
-        currency: "Unknown",
-        jobUrl: raw.url,
-        postedAt: isoDate(raw.datePosted),
-      });
-      return {
-        ...input,
-        externalId: raw.identifier ? String(raw.identifier) : raw.url,
-        provider: "JSON-LD" as const,
-        sourceUrl: raw.url,
-        descriptionHash: descriptionDigest(description),
-      };
+      return normalizeJsonLdJob(raw, context, "JSON-LD");
     },
   };
 }
