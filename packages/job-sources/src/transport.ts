@@ -70,6 +70,10 @@ export interface TransportOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   maxBytes?: number;
+  /** GET unless a captured pattern says POST. */
+  method?: "GET" | "POST";
+  /** Raw request body; only sent with POST. */
+  body?: string;
   /** Dependency injection for deterministic tests; never populated from source config. */
   fetchImpl?: typeof fetch;
   resolveHost?: (
@@ -92,6 +96,8 @@ export async function fetchText(
     AbortSignal.timeout(timeout),
     ...(options.signal ? [options.signal] : []),
   ]);
+  const method = options.method ?? "GET";
+  const body = method === "POST" ? (options.body ?? "") : undefined;
   const requestHeaders = {
     "User-Agent": "JobFinderBot/1.0",
     "Accept-Encoding": "identity",
@@ -99,6 +105,8 @@ export async function fetchText(
   };
   if (options.fetchImpl) {
     const response = await options.fetchImpl(url, {
+      method,
+      body,
       headers: requestHeaders,
       redirect: "error",
       signal,
@@ -146,7 +154,13 @@ export async function fetchText(
     const req = request(
       url,
       {
-        headers: requestHeaders,
+        method,
+        headers: {
+          ...requestHeaders,
+          ...(body !== undefined
+            ? { "Content-Length": String(Buffer.byteLength(body)) }
+            : {}),
+        },
         signal,
         agent: false,
         lookup: (_hostname, lookupOptions, callback) => {
@@ -184,6 +198,7 @@ export async function fetchText(
       },
     );
     req.on("error", reject);
+    if (body !== undefined) req.write(body);
     req.end();
   });
 }

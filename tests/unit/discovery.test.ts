@@ -143,3 +143,129 @@ Disallow: /careers/internal
     });
   });
 });
+
+import {
+  RobotsBlockedError,
+  RobotsCache,
+  discoveryFetch,
+} from "@jobfinder/discovery";
+
+/** Routes by URL string; unknown URLs return 404. */
+const routeFetch = (routes: Record<string, () => Response>) =>
+  (async (input: RequestInfo | URL) => {
+    const key = String(input instanceof Request ? input.url : input);
+    return routes[key]?.() ?? new Response("missing", { status: 404 });
+  }) as typeof fetch;
+
+const publicHost = async () => [{ address: "93.184.216.34", family: 4 }];
+
+describe("Phase 5 discovery transport", () => {
+  it("follows up to three public HTTPS redirects and records the chain", async () => {
+    const fetchImpl = routeFetch({
+      "https://acme.example/": () =>
+        new Response(null, { status: 301, headers: { location: "/home" } }),
+      "https://acme.example/home": () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://www.acme.example/" },
+        }),
+      "https://www.acme.example/": () =>
+        new Response("<title>Acme</title>", {
+          headers: { "content-type": "text/html" },
+        }),
+      "https://acme.example/robots.txt": () =>
+        new Response("", { status: 404 }),
+      "https://www.acme.example/robots.txt": () =>
+        new Response("", { status: 404 }),
+    });
+    const robots = new RobotsCache({ fetchImpl, resolveHost: publicHost });
+    const result = await discoveryFetch(new URL("https://acme.example/"), {
+      fetchImpl,
+      resolveHost: publicHost,
+      robots,
+    });
+    expect(result.finalUrl.href).toBe("https://www.acme.example/");
+    expect(result.chain).toEqual([
+      "https://acme.example/",
+      "https://acme.example/home",
+      "https://www.acme.example/",
+    ]);
+    expect(result.status).toBe(200);
+    expect(result.text).toContain("Acme");
+  });
+
+  it("stops at the fourth redirect and refuses plain-HTTP hops", async () => {
+    const loop = routeFetch({
+      "https://a.example/": () =>
+        new Response(null, { status: 302, headers: { location: "/1" } }),
+      "https://a.example/1": () =>
+        new Response(null, { status: 302, headers: { location: "/2" } }),
+      "https://a.example/2": () =>
+        new Response(null, { status: 302, headers: { location: "/3" } }),
+      "https://a.example/3": () =>
+        new Response(null, { status: 302, headers: { location: "/4" } }),
+      "https://a.example/robots.txt": () => new Response("", { status: 404 }),
+    });
+    const robots = new RobotsCache({
+      fetchImpl: loop,
+      resolveHost: publicHost,
+    });
+    await expect(
+      discoveryFetch(new URL("https://a.example/"), {
+        fetchImpl: loop,
+        resolveHost: publicHost,
+        robots,
+      }),
+    ).rejects.toThrow("Too many redirects");
+    const insecure = routeFetch({
+      "https://b.example/": () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: "http://b.example/x" },
+        }),
+      "https://b.example/robots.txt": () => new Response("", { status: 404 }),
+    });
+    await expect(
+      discoveryFetch(new URL("https://b.example/"), {
+        fetchImpl: insecure,
+        resolveHost: publicHost,
+        robots: new RobotsCache({
+          fetchImpl: insecure,
+          resolveHost: publicHost,
+        }),
+      }),
+    ).rejects.toThrow(/HTTPS/);
+  });
+
+  it("fetches robots.txt once per host and blocks disallowed paths", async () => {
+    let robotsCalls = 0;
+    const fetchImpl = routeFetch({
+      "https://c.example/robots.txt": () => {
+        robotsCalls++;
+        return new Response("User-agent: *\nDisallow: /careers\n");
+      },
+      "https://c.example/about": () => new Response("<p>ok</p>"),
+    });
+    const robots = new RobotsCache({ fetchImpl, resolveHost: publicHost });
+    const about = await discoveryFetch(new URL("https://c.example/about"), {
+      fetchImpl,
+      resolveHost: publicHost,
+      robots,
+    });
+    expect(about.status).toBe(200);
+    const blocked = discoveryFetch(new URL("https://c.example/careers"), {
+      fetchImpl,
+      resolveHost: publicHost,
+      robots,
+    });
+    await expect(blocked).rejects.toBeInstanceOf(RobotsBlockedError);
+    expect(robotsCalls).toBe(1);
+    const check = await robots.check(new URL("https://c.example/careers/x"));
+    expect(check).toMatchObject({
+      robotsAllowed: false,
+      robotsUrl: "https://c.example/robots.txt",
+      userAgent: "JobFinderBot/1.0",
+      matchedRule: "Disallow: /careers",
+    });
+  });
+});
