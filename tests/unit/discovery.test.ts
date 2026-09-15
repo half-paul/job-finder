@@ -269,3 +269,75 @@ describe("Phase 5 discovery transport", () => {
     });
   });
 });
+
+import {
+  careersProbePaths,
+  findCareersPage,
+  scoreCareersLinks,
+} from "@jobfinder/discovery";
+
+describe("Phase 5 careers URL finder", () => {
+  it("scores anchor text and path and keeps only same-domain or ATS links", () => {
+    const html = `
+      <a href="/about">About</a>
+      <a href="/company/careers">Join our team</a>
+      <a href="https://boards.greenhouse.io/acme">Open positions</a>
+      <a href="https://evil.example/careers">Careers</a>
+      <a href="/blog/jobs-report">Jobs report</a>`;
+    const scored = scoreCareersLinks(
+      html,
+      new URL("https://acme.example/"),
+      "acme.example",
+    );
+    expect(scored[0].url.href).toBe("https://acme.example/company/careers");
+    expect(scored.map((s) => s.url.hostname)).not.toContain("evil.example");
+    expect(scored.some((s) => s.url.hostname === "boards.greenhouse.io")).toBe(
+      true,
+    );
+  });
+
+  it("follows the best link, else probes known paths in order", async () => {
+    const fetched: string[] = [];
+    const fetchImpl = routeFetch({
+      "https://acme.example/robots.txt": () =>
+        new Response("", { status: 404 }),
+      "https://acme.example/": () => new Response("<a href='/team'>Team</a>"),
+      "https://acme.example/careers": () => new Response("", { status: 404 }),
+      "https://acme.example/jobs": () => new Response("<h1>Jobs at Acme</h1>"),
+    });
+    const tracking = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetched.push(String(input));
+      return fetchImpl(input, init);
+    }) as typeof fetch;
+    const robots = new RobotsCache({
+      fetchImpl: tracking,
+      resolveHost: publicHost,
+    });
+    const page = await findCareersPage("acme.example", {
+      fetchImpl: tracking,
+      resolveHost: publicHost,
+      robots,
+    });
+    expect(page?.finalUrl.href).toBe("https://acme.example/jobs");
+    expect(fetched.indexOf("https://acme.example/careers")).toBeLessThan(
+      fetched.indexOf("https://acme.example/jobs"),
+    );
+    expect(careersProbePaths[0]).toBe("/careers");
+  });
+
+  it("returns null when neither homepage links nor probes find a page", async () => {
+    const fetchImpl = routeFetch({
+      "https://none.example/robots.txt": () =>
+        new Response("", { status: 404 }),
+      "https://none.example/": () => new Response("<p>Hello</p>"),
+      "https://www.none.example/robots.txt": () =>
+        new Response("", { status: 404 }),
+    });
+    const page = await findCareersPage("none.example", {
+      fetchImpl,
+      resolveHost: publicHost,
+      robots: new RobotsCache({ fetchImpl, resolveHost: publicHost }),
+    });
+    expect(page).toBeNull();
+  });
+});
