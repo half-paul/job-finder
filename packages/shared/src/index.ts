@@ -4,6 +4,8 @@ import { automationPreferenceShape } from "./automation";
 export * from "./countries";
 export * from "./errors";
 export * from "./keywords";
+export * from "./discovery";
+export * from "./crawler";
 export * from "./automation";
 
 const short = z.string().trim().max(200);
