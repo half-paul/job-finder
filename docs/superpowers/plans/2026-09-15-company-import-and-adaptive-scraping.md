@@ -4133,15 +4133,13 @@ export async function importCompanies(
             )
         )[0]?.id ??
         null;
-      await tx
-        .insert(companyCandidates)
-        .values({
-          userId,
-          watchlistId,
-          name: row.name,
-          domain: row.domain,
-          status: "Pending",
-        });
+      await tx.insert(companyCandidates).values({
+        userId,
+        watchlistId,
+        name: row.name,
+        domain: row.domain,
+        status: "Pending",
+      });
     });
     imported++;
   }
