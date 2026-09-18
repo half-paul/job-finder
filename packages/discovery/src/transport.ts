@@ -46,7 +46,7 @@ export class RobotsCache {
             // HTML. Parsing it yields an empty ruleset, which reads as allow-all —
             // the opposite of the safe answer for a policy we could not verify.
             const contentType = response.headers.get("content-type") ?? "";
-            if (contentType && !/^\s*text\/plain\b/i.test(contentType))
+            if (contentType && !/^\s*text\/plain\s*(;|$)/i.test(contentType))
               throw new Error(
                 `Cannot verify robots.txt for ${host}: unexpected content type ${contentType}.`,
               );

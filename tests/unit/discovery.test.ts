@@ -356,6 +356,20 @@ describe("Phase 5 discovery transport", () => {
     );
     expect(check.robotsAllowed).toBe(true);
   });
+
+  it("rejects a robots.txt with content-type text/plain-something", async () => {
+    const fetchImpl = routeFetch({
+      "https://variant-robots.example/robots.txt": () =>
+        new Response("User-agent: *\nDisallow: /private\n", {
+          status: 200,
+          headers: { "content-type": "text/plain-something" },
+        }),
+    });
+    const robots = new RobotsCache({ fetchImpl, resolveHost: publicHost });
+    await expect(
+      robots.check(new URL("https://variant-robots.example/careers")),
+    ).rejects.toThrow(/unexpected content type/i);
+  });
 });
 
 import {
