@@ -47,6 +47,9 @@ export function createBrowserConnector(
           };
         }),
         complete: result.complete,
+        // A crawled page never proves the full inventory: an empty result is
+        // what a login wall or a stale selector returns, so removals stay off.
+        canMarkRemovals: false,
         notModified: false,
       };
     },

@@ -148,7 +148,7 @@ export async function evaluateJobWithDb(
   });
   const [spend] = await db
     .select({
-      spent: sql<number>`coalesce(sum(${jobMatches.estimatedCostMicros}), 0)::int`,
+      spent: sql<string>`coalesce(sum(${jobMatches.estimatedCostMicros}), 0)::bigint`,
     })
     .from(jobMatches)
     .where(
@@ -159,7 +159,7 @@ export async function evaluateJobWithDb(
     );
   const [discoverySpend] = await db
     .select({
-      spent: sql<number>`coalesce(sum(${activityEvents.estimatedCostMicros}), 0)::int`,
+      spent: sql<string>`coalesce(sum(${activityEvents.estimatedCostMicros}), 0)::bigint`,
     })
     .from(activityEvents)
     .where(
@@ -169,7 +169,7 @@ export async function evaluateJobWithDb(
       ),
     );
   if (
-    spend.spent + discoverySpend.spent + estimatedCost >
+    Number(spend.spent) + Number(discoverySpend.spent) + estimatedCost >
     careerPreferences.aiMonthlyBudgetMicros
   )
     throw new AppError(

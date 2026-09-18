@@ -24,22 +24,40 @@ export function CompanyBoard() {
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
+    let failures = 0;
     async function refresh() {
+      // Same contract as the activity feed: a hidden tab stops asking, and a
+      // failing endpoint is backed off instead of polled every two seconds.
+      if (document.visibilityState === "hidden") {
+        if (active) timer = setTimeout(() => void refresh(), 2000);
+        return;
+      }
       try {
         const result = await api<Overview>("companies");
+        failures = 0;
         if (active) {
           setOverview(result);
           setError("");
         }
       } catch (error) {
+        failures++;
         if (active) setError((error as Error).message);
       }
-      if (active) timer = setTimeout(() => void refresh(), 2000);
+      const delay = Math.min(2000 * 2 ** Math.min(failures, 5), 60_000);
+      if (active) timer = setTimeout(() => void refresh(), delay);
+    }
+    function onVisible() {
+      if (document.visibilityState === "visible" && active) {
+        clearTimeout(timer);
+        void refresh();
+      }
     }
     void refresh();
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       active = false;
       clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [revision]);
   async function action(id: string, method: "POST" | "DELETE") {

@@ -38,7 +38,7 @@ export function discoveryExtractor(
         );
         const [matches] = await tx
           .select({
-            spent: sql<number>`coalesce(sum(${jobMatches.estimatedCostMicros}), 0)::int`,
+            spent: sql<string>`coalesce(sum(${jobMatches.estimatedCostMicros}), 0)::bigint`,
           })
           .from(jobMatches)
           .where(
@@ -49,7 +49,7 @@ export function discoveryExtractor(
           );
         const [discovery] = await tx
           .select({
-            spent: sql<number>`coalesce(sum(${activityEvents.estimatedCostMicros}), 0)::int`,
+            spent: sql<string>`coalesce(sum(${activityEvents.estimatedCostMicros}), 0)::bigint`,
           })
           .from(activityEvents)
           .where(
@@ -60,7 +60,7 @@ export function discoveryExtractor(
           );
         const estimate = 50_000;
         if (
-          matches.spent + discovery.spent + estimate >
+          Number(matches.spent) + Number(discovery.spent) + estimate >
           settings.aiMonthlyBudgetMicros
         )
           throw new AppError(

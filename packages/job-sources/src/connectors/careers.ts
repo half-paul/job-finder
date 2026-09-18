@@ -76,16 +76,17 @@ export function createCareersConnector(
       if (cache.size >= maxPostingPages + maxLinks)
         throw new Error("Posting page cap reached for this scan");
       const html = await get(new URL(reference.url), signal);
+      const parsed = extractJsonLdJobs(html);
       const job =
-        extractJsonLdJobs(html).find(
+        parsed.find(
           (candidate) =>
             candidate.url === reference.url ||
             jsonLdExternalId(candidate) === reference.externalId,
-        ) ?? extractJsonLdJobs(html)[0];
+        ) ?? parsed[0];
       if (!job) throw new Error("Posting page has no JobPosting JSON-LD");
-      const normalizedId = reference.externalId;
-      cache.set(normalizedId, { ...job, url: job.url || reference.url });
-      return { ...job, url: job.url || reference.url };
+      const resolved = { ...job, url: job.url || reference.url };
+      cache.set(reference.externalId, resolved);
+      return resolved;
     },
     async normalize(raw, context) {
       return normalizeJsonLdJob(raw, context, "Careers");

@@ -7,6 +7,7 @@ import {
 import {
   resolveCompanyWebsite,
   RobotsBlockedError,
+  type DiscoveryOptions,
 } from "@jobfinder/discovery";
 import type { ConnectorOptions } from "@jobfinder/job-sources";
 import type { ScanSchedule } from "@jobfinder/shared";
@@ -216,7 +217,7 @@ export async function runHousekeeping(
 export async function runResolveCompanyJob(
   db: AutomationDb,
   job: { data: { userId: string; candidateId: string } },
-  options: import("@jobfinder/discovery").DiscoveryOptions = {},
+  options: DiscoveryOptions = {},
 ) {
   const { userId, candidateId } = job.data;
   const candidate = await claimCompany(db, userId, candidateId);

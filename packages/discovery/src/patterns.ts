@@ -84,8 +84,8 @@ export function buildPatternSpec(
   let urlTemplate = url;
   let bodyStr = body ?? null;
   const urlObj = new URL(url);
-  const hasPageParam = pageParam.test(
-    urlObj.searchParams.keys().next().value ?? "",
+  const hasPageParam = [...urlObj.searchParams.keys()].some((key) =>
+    pageParam.test(key),
   );
   if (hasPageParam) {
     urlObj.searchParams.forEach((value, key) => {
@@ -93,15 +93,22 @@ export function buildPatternSpec(
         urlObj.searchParams.set(key, "{page}");
       }
     });
-    urlTemplate = urlObj.toString();
+    urlTemplate = urlObj.toString().replace(/%7Bpage%7D/gi, "{page}");
   } else if (bodyStr) {
-    const bodyObj = JSON.parse(bodyStr);
+    let bodyObj: unknown;
+    try {
+      bodyObj = JSON.parse(bodyStr);
+    } catch {
+      // A non-JSON capture (form-encoded, say) carries no page field we can
+      // template; it is not a crash.
+      return null;
+    }
     if (typeof bodyObj === "object" && bodyObj !== null) {
-      const keys = Object.keys(bodyObj);
-      for (const key of keys) {
+      const record = bodyObj as Record<string, unknown>;
+      for (const key of Object.keys(record)) {
         if (pageParam.test(key)) {
-          bodyObj[key] = "{page}";
-          bodyStr = JSON.stringify(bodyObj);
+          record[key] = "{page}";
+          bodyStr = JSON.stringify(record);
           break;
         }
       }

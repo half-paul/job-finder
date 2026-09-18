@@ -298,17 +298,11 @@ export async function scanSourceWithDb(
             if (result === "updated") updated++;
             await bufferProgress("import", `${normalized.title}: ${result}.`);
           } catch (error) {
-            await bufferProgress(
-              "warning",
-              `${reference.externalId}: ${error instanceof Error ? error.message : "Could not read posting"}`,
-            );
-            warnings.push(
-              `${reference.externalId}: ${
-                error instanceof Error
-                  ? error.message
-                  : "could not normalize job"
-              }`,
-            );
+            const warning = `${reference.externalId}: ${
+              error instanceof Error ? error.message : "could not read posting"
+            }`;
+            await bufferProgress("warning", warning);
+            warnings.push(warning);
           } finally {
             processed++;
             if (processed % 10 === 0)

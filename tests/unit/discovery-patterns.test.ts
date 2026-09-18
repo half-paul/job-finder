@@ -69,11 +69,40 @@ describe("Phase 5 captured-pattern spec builder", () => {
   it("rewrites a numeric page query parameter and keeps only allowlisted headers", () => {
     const spec = buildPatternSpec(base);
     expect(spec).toMatchObject({
-      urlTemplate: "https://acme.example/api/jobs?page=%7Bpage%7D",
+      urlTemplate: "https://acme.example/api/jobs?page={page}",
       headers: { accept: "application/json" },
     });
     expect(spec?.headers).not.toHaveProperty("cookie");
     expect(spec?.headers).not.toHaveProperty("authorization");
+  });
+
+  it("emits a placeholder renderTemplate can actually substitute", () => {
+    // URLSearchParams percent-encodes the braces, so the built template used
+    // to carry %7Bpage%7D while both consumers only ever matched "{page}".
+    const spec = buildPatternSpec(base);
+    expect(renderTemplate(spec!.urlTemplate, 3)).toBe(
+      "https://acme.example/api/jobs?page=3",
+    );
+  });
+
+  it("templates a page parameter that is not the first query key", () => {
+    const spec = buildPatternSpec({
+      ...base,
+      url: "https://acme.example/api/jobs?limit=50&page=1",
+    });
+    expect(spec?.urlTemplate).toContain("page={page}");
+    expect(renderTemplate(spec!.urlTemplate, 2)).toContain("page=2");
+  });
+
+  it("returns null instead of throwing on a non-JSON captured body", () => {
+    expect(() =>
+      buildPatternSpec({
+        ...base,
+        url: "https://acme.example/api/jobs",
+        method: "POST",
+        body: "page=1&limit=50",
+      }),
+    ).not.toThrow();
   });
 
   it("rewrites a numeric page field inside a JSON POST body when the URL has none", () => {

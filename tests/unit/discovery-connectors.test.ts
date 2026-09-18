@@ -179,6 +179,30 @@ describe("Phase 5 posting links and JSON-LD careers connector", () => {
     expect(normalized.location).toContain("Applicants: United States, Canada");
   });
 
+  it("treats a non-numeric salary as unknown rather than zero", async () => {
+    // "Competitive" strips to "" and Number("") is 0, so this used to render
+    // a $0 salary and hand the evaluator a figure the posting never stated.
+    const html = posting(
+      "9",
+      `,"baseSalary":{"@type":"MonetaryAmount","currency":"USD",
+         "value":{"@type":"QuantitativeValue","value":"Competitive","unitText":"YEAR"}}`,
+    );
+    const [raw] = extractJsonLdJobs(html);
+    const normalized = await createConnector("Careers", {
+      fetchImpl: routeFetch({
+        "https://acme.example/careers": () => new Response(html),
+      }),
+    }).normalize(raw, {
+      query: {
+        board: "acme.example",
+        terms: [],
+        sourceUrl: "https://acme.example/careers",
+      },
+    });
+    expect(normalized.salaryMin).toBeNull();
+    expect(normalized.salaryMax).toBeNull();
+  });
+
   it("reports an unrecognised currency as Unknown", async () => {
     const html = posting(
       "9",

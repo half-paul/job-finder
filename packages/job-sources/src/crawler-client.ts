@@ -48,6 +48,8 @@ export function createHttpCrawlerClient(
   ): Promise<T> {
     const response = await fetchImpl(`${base}${path}`, {
       method: "POST",
+      // The bearer secret must not follow a redirect to somewhere unintended.
+      redirect: "error",
       headers: {
         authorization: `Bearer ${config.secret}`,
         "content-type": "application/json",

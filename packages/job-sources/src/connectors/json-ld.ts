@@ -120,7 +120,12 @@ export function jsonLdExternalId(job: JsonLdJob): string {
 
 const toInt = (value: number | string | undefined) => {
   if (value === undefined) return null;
-  const parsed = Math.round(Number(String(value).replace(/[^0-9.]/g, "")));
+  // "Competitive", "DOE" and "" all strip to an empty string, and Number("")
+  // is 0. A salary the posting never stated must stay unknown, because a
+  // fabricated 0 reaches both the salary display and the AI evaluator.
+  const cleaned = String(value).replace(/[^0-9.]/g, "");
+  if (!cleaned) return null;
+  const parsed = Math.round(Number(cleaned));
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 };
 
