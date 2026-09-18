@@ -81,6 +81,7 @@ export function publicAddressAllowed(address: string): boolean {
 export async function resolvesToPublicAddress(
   hostname: string,
 ): Promise<boolean> {
+  if (insecureTestHostnameAllowed(hostname)) return true;
   if (isIP(hostname)) return publicAddressAllowed(hostname);
   try {
     const records = await lookupWithin(hostname, dnsTimeoutMs);
@@ -91,6 +92,36 @@ export async function resolvesToPublicAddress(
   } catch {
     return false;
   }
+}
+
+/**
+ * TEST-ONLY escape hatch. `tests/e2e/crawler.spec.ts` serves its fixture at
+ * `https://host.docker.internal:<port>`, which resolves into private address
+ * space and is correctly refused by `publicAddressAllowed` below — that
+ * refusal is the whole point of this module. This function lets exactly one,
+ * literal, environment-named hostname through that check, and nothing else:
+ * not a range, not a prefix, not "anything private".
+ *
+ * It cannot be switched on by ordinary configuration:
+ * - `CRAWLER_INSECURE_TEST_HOSTNAME` is unset by default, so this returns
+ *   `false` for every hostname in production and in ordinary local
+ *   development, with no code change required to keep it off.
+ * - It is not documented in `.env.example` and is never set in
+ *   `compose.yaml`'s `crawler` service (the one that runs anywhere real
+ *   traffic reaches). Only `compose.e2e.yaml` — an overlay applied
+ *   explicitly and only for a local or CI e2e run, never on its own — sets
+ *   it, to the one hostname the e2e fixture uses.
+ * - Even fully set, it allows one exact hostname string, so it cannot be
+ *   repurposed into a general SSRF bypass by pointing a different hostname
+ *   at a private address.
+ *
+ * Follows the same gate pattern as `CRAWLER_INSECURE_TLS` in `session.ts`:
+ * an environment flag read directly, off by default, and named so a reader
+ * cannot mistake it for anything but a test affordance.
+ */
+function insecureTestHostnameAllowed(hostname: string): boolean {
+  const allowed = process.env.CRAWLER_INSECURE_TEST_HOSTNAME?.trim();
+  return Boolean(allowed) && hostname === allowed;
 }
 
 /** A resolver that never answers must not be able to stall us indefinitely. */

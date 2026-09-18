@@ -32,13 +32,27 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm run typecheck
+      # Installed before `npm test`, not after: tests/unit/crawler-*.test.ts
+      # launches a real Chromium and fails (not skips) when it is absent, by
+      # design — a silently-skipped security test is how the SSRF this suite
+      # guards against survived three earlier review rounds.
+      - run: npx playwright install --with-deps chromium
       - run: npm test
       - run: npm run db:migrate
       - run: npm audit --audit-level=moderate
       - run: npm run build
-      - run: npx playwright install --with-deps chromium
+      # The crawler runs as its own container, with the e2e-only overlay that
+      # tests/e2e/crawler.spec.ts needs (its private-address test fixture and
+      # relaxed TLS for a self-signed cert — see compose.e2e.yaml). This is
+      # the only compose service started in CI; postgres is the job's own
+      # `services:` container above, and web/worker run directly via
+      # Playwright's `webServer` (playwright.config.ts).
+      - run: docker compose -f compose.yaml -f compose.e2e.yaml up -d --build crawler
       - run: npm run test:e2e
+      - run: docker compose -f compose.yaml -f compose.e2e.yaml down -v
+        if: always()
       - run: docker build -t jobfinder:ci .
+      - run: docker build -f apps/crawler/Dockerfile -t jobfinder-crawler:ci .
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

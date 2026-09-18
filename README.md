@@ -57,6 +57,8 @@ The `web` container optionally reads ignored `.env.local` for AI models/key and 
 
 The `worker` service runs the same image with `npm run worker`. It publishes no ports, depends on the migration service, restarts unless stopped, and is the only place scheduled scans, scheduled evaluation, alerts, the daily digest and cleanup run. Stop it with `docker compose stop worker` if you want to confirm the Automation page reports "Not running" while nothing runs in the background. No Redis is needed: pg-boss keeps its queues in the same PostgreSQL database.
 
+The `crawler` service builds `apps/crawler/Dockerfile` from the `mcr.microsoft.com/playwright:v1.63.0-noble` image and runs `npm run crawler`, an isolated HTTP service (default port 4000) that only `worker` can reach. It never receives `DATABASE_URL`, is on its own Compose network with no route to `postgres` or `web`, and publishes no port. `worker` calls it over `CRAWLER_URL`/`CRAWLER_SECRET` (both set by Compose for local development) to run a Playwright-based careers-page crawl or to capture the JSON API a careers page calls; see [architecture: crawler isolation boundary](doc/architecture.md#crawler-isolation-boundary). Unset `CRAWLER_URL`/`CRAWLER_SECRET` and discovery simply skips these two rungs, falling back to AI extraction with a warning on the candidate's activity feed — nothing is stubbed or fabricated.
+
 ```sh
 docker compose logs -f worker   # follow scheduled scan and digest activity
 docker compose restart worker   # pick up new code or configuration
@@ -73,26 +75,28 @@ docker compose up -d postgres
 npm run db:migrate
 npm run dev
 npm run worker   # second terminal: scheduled scans, alerts, digest, cleanup
+npm run crawler  # third terminal, optional: browser crawl and captured-API replay
 ```
 
-Do not overwrite an existing `.env.local`; add only missing configuration. Root `.env.local` is loaded by development, start, worker and migration commands and ignored by Git/Docker. `DATABASE_URL` is required; `APP_ORIGIN` must exactly match the browser origin for writes. The default is `http://localhost:3000`, not `127.0.0.1`. Secure cookies are enabled for HTTPS origins. `OPENAI_API_KEY` is required for AI evaluation, careers extraction fallback and the digest narrative; the rest of the workspace runs without it, and a scheduled evaluation without a key records a failure instead of a score. Agent shell operations must prefix commands with `rtk proxy`, per `AGENTS.md`.
+Do not overwrite an existing `.env.local`; add only missing configuration. Root `.env.local` is loaded by development, start, worker and migration commands and ignored by Git/Docker. `DATABASE_URL` is required; `APP_ORIGIN` must exactly match the browser origin for writes. The default is `http://localhost:3000`, not `127.0.0.1`. Secure cookies are enabled for HTTPS origins. `OPENAI_API_KEY` is required for AI evaluation, careers extraction fallback and the digest narrative; the rest of the workspace runs without it, and a scheduled evaluation without a key records a failure instead of a score. `CRAWLER_URL` and `CRAWLER_SECRET` point the worker at the crawler service; leave them unset to skip the captured-API and browser rungs. `npm run crawler` needs Playwright's Chromium installed (`npx playwright install chromium`) and its own `CRAWLER_SECRET`. Agent shell operations must prefix commands with `rtk proxy`, per `AGENTS.md`.
 
 ## Commands and verification
 
-| Command                                   | Purpose                                                              |
-| ----------------------------------------- | -------------------------------------------------------------------- |
-| `npm run dev`                             | Development server with reload                                       |
-| `npm run lint`                            | ESLint, including explicit-any prohibition                           |
-| `npm run typecheck`                       | Strict TypeScript across apps/packages/tests                         |
-| `npm run format` / `npm run format:check` | Prettier write/check                                                 |
-| `npm test`                                | Deterministic unit tests; no network/database required               |
-| `npm run db:generate`                     | Generate migration from schema changes                               |
-| `npm run db:migrate`                      | Apply migrations and enable pgvector                                 |
-| `npm run worker`                          | pg-boss worker: scheduled scans, evaluation, alerts, digest, cleanup |
-| `npm run build` / `npm start`             | Production build/start                                               |
-| `npm exec playwright install chromium`    | Install browser test runtime                                         |
-| `npm run test:e2e`                        | Real PostgreSQL/API and browser integration suite                    |
-| `npm audit --audit-level=moderate`        | Dependency vulnerability check                                       |
+| Command                                   | Purpose                                                                                                                                                                                                              |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`                             | Development server with reload                                                                                                                                                                                       |
+| `npm run lint`                            | ESLint, including explicit-any prohibition                                                                                                                                                                           |
+| `npm run typecheck`                       | Strict TypeScript across apps/packages/tests                                                                                                                                                                         |
+| `npm run format` / `npm run format:check` | Prettier write/check                                                                                                                                                                                                 |
+| `npm test`                                | Deterministic unit tests; no network/database required, but **needs Chromium installed** (`npx playwright install chromium`) — the crawler policy tests launch a real browser and fail, rather than skip, without it |
+| `npm run db:generate`                     | Generate migration from schema changes                                                                                                                                                                               |
+| `npm run db:migrate`                      | Apply migrations and enable pgvector                                                                                                                                                                                 |
+| `npm run worker`                          | pg-boss worker: scheduled scans, evaluation, alerts, digest, cleanup                                                                                                                                                 |
+| `npm run crawler`                         | Isolated browser crawler/captured-API service (`apps/crawler`); needs Chromium and its own `CRAWLER_SECRET`                                                                                                          |
+| `npm run build` / `npm start`             | Production build/start                                                                                                                                                                                               |
+| `npm exec playwright install chromium`    | Install browser test runtime, required by `npm test` and `npm run crawler` too                                                                                                                                       |
+| `npm run test:e2e`                        | Real PostgreSQL/API and browser integration suite                                                                                                                                                                    |
+| `npm audit --audit-level=moderate`        | Dependency vulnerability check                                                                                                                                                                                       |
 
 ### Discovery configuration
 
@@ -132,6 +136,17 @@ For the full command matrix, observed results, opt-in live tests and limitations
 
 For integration/E2E tests, start PostgreSQL, migrate and build first. Playwright starts the production server unless one is already running at localhost:3000. Stop Compose web (`docker compose stop web`) before testing a host build to avoid silently testing an older container. Tests create unique `@example.test` accounts and synthetic jobs/resumes; use a disposable test database if you do not want those records in your development database. `DATABASE_URL` selects the test database; the app must use the same URL. For custom configuration, load it into the test process with `node --env-file=.env.local node_modules/@playwright/test/cli.js test`; plain `npm run test:e2e` only loads that file in the host web server. Snapshots/traces go into ignored `test-results/`.
 
+`tests/e2e/crawler.spec.ts` needs a running crawler reachable at `CRAWLER_URL` (default `http://localhost:4000`) with the matching `CRAWLER_SECRET` (default `local-development-only`). Its fixture serves an HTTPS origin at `host.docker.internal` with a self-signed certificate, which production's own address checks correctly refuse — so the crawler must run with the test-only overlay `compose.e2e.yaml`, never with `compose.yaml` alone:
+
+```sh
+docker compose build crawler worker web
+docker compose -f compose.yaml -f compose.e2e.yaml up -d --build crawler
+docker compose up -d
+npx playwright test tests/e2e/crawler.spec.ts tests/e2e/companies.spec.ts
+```
+
+`compose.e2e.yaml` is never used outside a test run: it is what publishes the crawler's port, relaxes TLS verification for both Chromium (`CRAWLER_INSECURE_TLS`) and Node's own `fetch` (`NODE_TLS_REJECT_UNAUTHORIZED`), and allowlists the one test hostname (`CRAWLER_INSECURE_TEST_HOSTNAME`) the fixture uses. None of those three variables appear in `compose.yaml` or `.env.example`.
+
 Unit tests cover password verification, exact origin checks, bounded bodies, canonical URLs, weight validation, keyword import gates, qualification/interest scoring, hard filters, strict AI schemas, OpenAI response validation and cost estimation, UTC schedule alignment, recommendation bands, watchlist keys, alert dedupe identity and preference defaults, and real TXT/PDF/DOCX parsing including malformed/oversized/compressed input. API/database tests verify hashed credentials/sessions, revocation, rate limits, foreign keys, pgvector, hard-filter precedence, archiving scope, source ownership, watchlist scoping, worker scan idempotency, alert and digest idempotency, source schedules and expired-row cleanup. Browser tests verify profile/preferences, resume ownership, private jobs, saved-state/history, archive and restore counts, filtering, mobile overflow, theme and sign-in/out.
 
 GitHub Actions runs formatting, lint, types, unit tests, migrations, dependency scanning, build, database/browser tests and container build. Deployment is deferred until an environment is configured.
@@ -141,6 +156,7 @@ GitHub Actions runs formatting, lint, types, unit tests, migrations, dependency 
 ```text
 apps/web/              UI, authenticated routes, application services
 apps/worker/           pg-boss worker: scheduled scans, evaluation, alerts, digest, cleanup
+apps/crawler/          Isolated Playwright crawler and captured-API service; no DB credentials, no published port
 packages/automation/   Scan/evaluation/watchlist/alert/digest services shared by web and worker
 packages/db/           Drizzle schema, generated SQL, migration runner
 packages/shared/       Zod contracts and editable defaults
@@ -167,7 +183,9 @@ The worker picks up queued companies on its next minute tick. It checks robots.t
 
 **Live activity** on Companies, Watchlist and Automation refreshes every two seconds. It records website/robots requests, HTTP outcomes, source selection, AI extraction, imports, filtering, scan results, evaluation/alerts, digests and worker lifecycle events. Company and scan state survive a reload. Automation also refreshes heartbeat and run counters. Errors stay visible; Retry discovery requeues a failed company. Removing a company disables its source. Private activity is owner-scoped; shared events contain only generic worker lifecycle/maintenance information. Activity is retained for 90 days.
 
-Custom careers extraction is bounded to 10 pages, four AI calls and 100 postings per scan. It reads HTTP page content; JavaScript-only sites, login walls and CAPTCHAs are not bypassed. Unsupported layouts report a visible failure, and capped walks report Partial. Custom careers scans never mark old listings removed because the full inventory cannot be proven. A missing AI key or unavailable robots policy is a visible failure. No browser crawler service is deployed by this change; existing captured-API/browser scaffolding remains unfinished.
+Custom careers extraction is bounded to 10 pages, four AI calls and 100 postings per scan. It reads HTTP page content; login walls and CAPTCHAs are not bypassed. Unsupported layouts report a visible failure, and capped walks report Partial. Custom careers scans never mark old listings removed because the full inventory cannot be proven. A missing AI key or unavailable robots policy is a visible failure.
+
+When no ATS or JSON-LD is found and the `crawler` service is configured, discovery asks it to watch the careers page for a JSON API it calls; a replayable pattern is saved (`crawl_patterns`) and later scans replay that request over plain HTTP, no browser required. When nothing is replayable, the crawler instead walks the careers page itself (bounded pages/postings, `robots.txt` honoured, third-party hosts and non-public addresses refused, no CAPTCHA solving — a challenge page ends the session). Only when the crawler is unavailable or fails does discovery fall back to the AI extraction path above. `packages/discovery`'s ATS detection and company intake are complete; only the described fallback ordering and its two crawler rungs are new here.
 
 Each AI extraction call records a conservative $0.05 estimate, including failures, against the existing monthly preference budget and stored match estimates. This assumes default model pricing and is **not a hard billing cap** or actual token accounting. The existing key and `OPENAI_EXPLANATION_MODEL` are reused. Tests inject website and model fixtures; they make no paid calls.
 

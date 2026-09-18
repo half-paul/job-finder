@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   blockedResource,
   crawlerUserAgent,
@@ -227,6 +227,32 @@ describe("crawler policy", () => {
       await expect(resolvesToPublicAddress("93.184.216.34")).resolves.toBe(
         true,
       );
+    });
+
+    describe("CRAWLER_INSECURE_TEST_HOSTNAME", () => {
+      const key = "CRAWLER_INSECURE_TEST_HOSTNAME";
+      const original = process.env[key];
+      afterEach(() => {
+        if (original === undefined) delete process.env[key];
+        else process.env[key] = original;
+      });
+
+      it("refuses a private hostname when unset, matching production", async () => {
+        delete process.env[key];
+        await expect(
+          resolvesToPublicAddress("host.docker.internal"),
+        ).resolves.toBe(false);
+      });
+
+      it("allows only the exact hostname it names", async () => {
+        process.env[key] = "host.docker.internal";
+        await expect(
+          resolvesToPublicAddress("host.docker.internal"),
+        ).resolves.toBe(true);
+        // A different hostname resolving privately is unaffected — this is
+        // not a general SSRF bypass.
+        await expect(resolvesToPublicAddress("localhost")).resolves.toBe(false);
+      });
     });
   });
 });

@@ -306,6 +306,120 @@ test("worker resolves a company, scans its API and records actions with injected
   }
 });
 
+// Deferred coverage (Task 3 wired scan.ts, Task 5 persisted the pattern row;
+// neither had an executable test): resolution producing a `CapturedApi`
+// source with its `crawl_patterns` row, and a scan replaying that pattern.
+// This drives the same handlers as the test above with an injected
+// `crawlerClient` instead of a real crawler container — the real, networked
+// capture/crawl path is covered separately by tests/e2e/crawler.spec.ts.
+test("worker resolves a company to a captured API, saves its pattern, and a scan replays it", async ({
+  request,
+}) => {
+  const user = await register(request);
+  const pool = new Pool({ connectionString: databaseUrl });
+  const capturedFetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === "https://captured-api.example/robots.txt")
+      return new Response("User-agent: *\nAllow: /\n", {
+        headers: { "content-type": "text/plain" },
+      });
+    if (url === "https://captured-api.example/")
+      return new Response('<a href="/careers">Careers</a>');
+    if (url === "https://captured-api.example/careers")
+      return new Response("<html><body>Roles load here</body></html>");
+    if (url === "https://captured-api.example/api/jobs?page=1")
+      return Response.json({
+        results: [{ title: "Director of Infrastructure", url: "/jobs/501" }],
+      });
+    if (url === "https://captured-api.example/api/jobs?page=2")
+      return Response.json({ results: [] });
+    return new Response("missing", { status: 404 });
+  }) as typeof fetch;
+  // Stands in for the real crawler service's `/capture` endpoint: one
+  // watched page call away from `tests/e2e/crawler.spec.ts`'s equivalent
+  // fixture, but exercised here through the same in-process handlers the
+  // greenhouse test above uses, against the real dockerized database.
+  const crawlerClient = {
+    crawl: async () => ({ jobs: [], complete: true, warnings: [] }),
+    capture: async () => ({
+      patterns: [
+        {
+          url: "https://captured-api.example/api/jobs?page=1",
+          method: "GET" as const,
+          headers: { accept: "application/json" },
+          body: null,
+          jobsPath: "/results",
+          sample: [
+            {
+              title: "Sample Posting",
+              url: "https://captured-api.example/jobs/999",
+            },
+          ],
+        },
+      ],
+      warnings: [],
+    }),
+  };
+  try {
+    await importCompanies(getDb(), user.id, "Captured Co,captured-api.example");
+    const [{ candidate }] = await listCompanies(getDb(), user.id);
+    const result = await runResolveCompanyJob(
+      getDb(),
+      { data: { candidateId: candidate.id, userId: user.id } },
+      { fetchImpl: capturedFetch, crawlerClient },
+    );
+    expect(result).toEqual({ resolved: true });
+    const [resolved] = await listCompanies(getDb(), user.id);
+    expect(resolved.candidate).toMatchObject({
+      status: "Resolved",
+      strategy: "captured-api",
+      ats: null,
+    });
+    expect(resolved.source).toMatchObject({ provider: "CapturedApi" });
+    const pattern = await pool.query(
+      "SELECT url_template, method, jobs_path, field_map FROM crawl_patterns WHERE source_id=$1",
+      [resolved.source!.id],
+    );
+    expect(pattern.rows).toHaveLength(1);
+    expect(pattern.rows[0]).toMatchObject({
+      url_template: "https://captured-api.example/api/jobs?page={page}",
+      method: "GET",
+      jobs_path: "/results",
+    });
+    expect(pattern.rows[0].field_map).toMatchObject({
+      title: "/title",
+      url: "/url",
+    });
+    const queued: string[] = [];
+    const scan = await runScanJob(
+      getDb(),
+      {
+        enqueueEvaluation: async (job) => {
+          queued.push(job.userId);
+        },
+      },
+      {
+        id: randomUUID(),
+        data: {
+          userId: user.id,
+          sourceId: resolved.source!.id,
+          schedule: "Every 4 hours",
+        },
+      },
+      { connectorOptions: { fetchImpl: capturedFetch } },
+    );
+    expect(scan).toMatchObject({
+      status: "Succeeded",
+      added: 1,
+      evaluationQueued: true,
+    });
+    expect(queued).toEqual([user.id]);
+  } finally {
+    await cleanup(pool, user.id);
+    await pool.end();
+  }
+});
+
 test("claims are exclusive, stale work is recoverable, and robots errors remain visible", async ({
   request,
 }) => {

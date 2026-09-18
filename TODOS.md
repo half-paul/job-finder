@@ -2,30 +2,6 @@
 
 ## Company discovery
 
-### Captured API connector
-
-**What:** Implement `packages/job-sources/src/connectors/captured-api.ts` and replace the `Not implemented` throw in `createConnector`'s `CapturedApi` branch.
-
-**Why:** The resolver ladder documented in `doc/architecture.md` has four tiers. Three ship today (ATS, JSON-LD, AI extraction); replaying a captured JSON request is the fourth, and it is the cheapest way to scan a site whose careers page loads listings from its own API.
-
-**Context:** Deferred from Task 9 of `docs/superpowers/plans/2026-09-15-company-import-and-adaptive-scraping.md` when the Phase 5 branch landed. The pattern inference half already exists and is fully tested: `packages/discovery/src/patterns.ts` provides `inferFieldMap`, `buildPatternSpec`, `validatePattern` and `renderTemplate`, and `packages/shared/src/crawler.ts` holds the protocol contracts. The `crawl_patterns` table exists from migration 0006. Nothing reads any of it yet.
-
-**Effort:** L
-**Priority:** P1
-**Depends on:** None
-
-### Wire saved crawl patterns into the scan engine
-
-**What:** Load a source's `crawl_patterns` row in `packages/automation/src/scan.ts`, pass a crawler client into `createConnector`, and mark a pattern verified after a successful run.
-
-**Why:** `crawl_patterns` is currently written by nothing and read by nothing. Until the scan engine uses it, a saved pattern cannot survive a restart and the table is dead schema.
-
-**Context:** Deferred from Task 10 of the Phase 5 plan. `packages/job-sources/src/crawler-client.ts` (`crawlerClientFromEnv`, `createHttpCrawlerClient`) and the `Browser` connector exist and are tested, but have no live caller — `scan.ts` special-cases the `Careers` provider to the adaptive connector and never reaches those branches.
-
-**Effort:** M
-**Priority:** P1
-**Depends on:** Captured API connector
-
 ### Re-resolve a company after repeated scan failures
 
 **What:** Add the `recordSourceFailure` behavior from the plan: reset a candidate to `Pending` after 3 consecutive `Failed` runs and increment `crawl_patterns.failures`.
