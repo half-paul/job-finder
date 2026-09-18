@@ -184,9 +184,16 @@ export function createConnector(
     case "Jobicy":
       return createJobicyConnector(options);
     case "Careers":
-      return createCareersConnector(options);
+      // Careers sources are scanned through the adaptive connector in
+      // @jobfinder/discovery, which enforces robots on every hop. There is
+      // deliberately no plain-fetch Careers connector to fall back to.
+      throw new Error(
+        "Careers sources are scanned through the discovery package, not createConnector.",
+      );
     case "CapturedApi":
-      throw new Error("Not implemented");
+      throw new Error(
+        "Saved-API replay is not available yet; see the captured-API entry in TODOS.md.",
+      );
     case "Browser":
       return createBrowserConnector(options);
   }
@@ -195,7 +202,6 @@ export function createConnector(
 import {
   createAshbyConnector,
   createBrowserConnector,
-  createCareersConnector,
   createGreenhouseConnector,
   createJsonLdConnector,
   createLeverConnector,
@@ -206,7 +212,6 @@ import {
 export {
   createAshbyConnector,
   createBrowserConnector,
-  createCareersConnector,
   createGreenhouseConnector,
   createJsonLdConnector,
   createLeverConnector,
@@ -215,7 +220,6 @@ export {
   createHttpCrawlerClient,
   crawlerClientFromEnv,
 };
-export * from "./posting-links";
 export {
   extractJsonLdJobs,
   jsonLdExternalId,

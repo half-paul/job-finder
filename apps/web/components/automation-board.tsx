@@ -22,7 +22,11 @@ const when = (value: Date | string | null | undefined) =>
 export function AutomationBoard({ overview }: { overview: Overview }) {
   const router = useRouter();
   useEffect(() => {
-    const timer = setInterval(() => router.refresh(), 5000);
+    // A backgrounded tab refetched this route's whole RSC payload every five
+    // seconds, on top of the activity feed's own poll.
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") router.refresh();
+    }, 5000);
     return () => clearInterval(timer);
   }, [router]);
   const [busy, setBusy] = useState<string | null>(null);

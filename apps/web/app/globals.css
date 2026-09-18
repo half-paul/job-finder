@@ -10,6 +10,7 @@
   --accent-soft: #eaf4f0;
   --sidebar: #142d30;
   --danger: #a43232;
+  --danger-soft: #fff0ee;
   --radius: 12px;
   color-scheme: light;
 }
@@ -22,6 +23,7 @@
   --accent: #79ceb6;
   --accent-soft: #233e39;
   --danger: #ffaaaa;
+  --danger-soft: #3a2422;
   color-scheme: dark;
 }
 * {
@@ -162,10 +164,11 @@ small {
   padding: 0 10px;
   background: none;
   border: 0;
-  border-radius: 5px;
+  border-radius: 7px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 600;
+  transition: background 0.15s;
 }
 .icon-button-labeled:hover {
   background: var(--accent-soft);
@@ -951,8 +954,17 @@ legend {
   color: var(--accent);
 }
 .error {
-  background: #fff0ee;
+  background: var(--danger-soft);
   color: var(--danger);
+}
+/* Inline error text inside a cell or a list row. The .error block above is an
+   alert box: used on a <small> or an <li> its padding and background render
+   as a stray coloured slab rather than as emphasis. */
+.is-error {
+  color: var(--danger);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 42ch;
 }
 .back-link {
   display: inline-flex;
@@ -1450,10 +1462,53 @@ legend {
   overflow-wrap: anywhere;
 }
 .activity-log .timeline li {
-  padding: 10px 0;
+  /* Padding on top would push the row's text below its absolutely positioned
+     bullet, which is anchored to the padding box. */
+  padding: 0 0 10px;
 }
+/* The segmented mode switcher is not a form footer: .form-actions alone gave
+   it a border-top and right alignment directly under the panel heading. */
 .company-tabs {
+  display: flex;
+  justify-content: flex-start;
+  gap: 8px;
+  padding-top: 0;
+  border-top: 0;
   margin-bottom: 20px;
+}
+/* The global reset strips link colour and underline, so a bare <a> in a table
+   cell or a sentence is indistinguishable from the text around it. */
+.cell-link {
+  display: inline-block;
+  margin-top: 4px;
+  color: var(--accent);
+  font-size: 10px;
+  text-underline-offset: 3px;
+}
+.cell-link:hover {
+  text-decoration: underline;
+}
+.inline-link {
+  color: var(--accent);
+  text-underline-offset: 3px;
+}
+.inline-link:hover {
+  text-decoration: underline;
+}
+/* .panel carries no padding of its own; its children supply it. */
+.panel-message {
+  padding: 0 25px 25px;
+  color: var(--muted);
+}
+.activity-footer {
+  padding: 15px 25px;
+}
+/* The message is the row's primary line; .timeline span alone renders it at
+   the same size and colour as its own timestamp. */
+.activity-log .timeline li > span {
+  display: block;
+  color: var(--text);
+  font-size: 11px;
 }
 .form-grid .full-width {
   grid-column: 1 / -1;

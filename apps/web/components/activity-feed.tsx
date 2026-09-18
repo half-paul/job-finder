@@ -80,7 +80,7 @@ export function ActivityFeed({ candidateId }: { candidateId?: string }) {
     ).values(),
   ];
   return (
-    <section className="panel opportunities activity-panel">
+    <section className="panel opportunities">
       <div className="panel-heading">
         <div>
           <h2>Live activity</h2>
@@ -100,6 +100,8 @@ export function ActivityFeed({ candidateId }: { candidateId?: string }) {
       )}
       <div
         className="activity-log"
+        role="region"
+        tabIndex={0}
         aria-label="Worker and application activity"
       >
         {all.length ? (
@@ -107,7 +109,7 @@ export function ActivityFeed({ candidateId }: { candidateId?: string }) {
             {all.map((event) => (
               <li
                 key={event.id}
-                className={event.level === "error" ? "error" : undefined}
+                className={event.level === "error" ? "is-error" : undefined}
               >
                 <small className="cell-sub">
                   <time dateTime={event.createdAt}>
@@ -127,29 +129,31 @@ export function ActivityFeed({ candidateId }: { candidateId?: string }) {
         )}
       </div>
       {hasMore && (
-        <Button
-          variant="outline"
-          disabled={loading}
-          onClick={async () => {
-            setLoading(true);
-            try {
-              const last = all.at(-1);
-              if (!last) return;
-              // The cursor is the last row's id: the server reads the exact
-              // boundary back from it, so rows sharing a timestamp are not
-              // skipped and no precision is lost in the round trip.
-              const result = await api<Activity[]>(activityPath(last.id));
-              setOlder([...older, ...result]);
-              setHasMore(result.length === activityPageLimit);
-            } catch (error) {
-              setError((error as Error).message);
-            } finally {
-              setLoading(false);
-            }
-          }}
-        >
-          {loading ? "Loading…" : "Load older activity"}
-        </Button>
+        <div className="activity-footer">
+          <Button
+            variant="outline"
+            disabled={loading}
+            onClick={async () => {
+              setLoading(true);
+              try {
+                const last = all.at(-1);
+                if (!last) return;
+                // The cursor is the last row's id: the server reads the exact
+                // boundary back from it, so rows sharing a timestamp are not
+                // skipped and no precision is lost in the round trip.
+                const result = await api<Activity[]>(activityPath(last.id));
+                setOlder([...older, ...result]);
+                setHasMore(result.length === activityPageLimit);
+              } catch (error) {
+                setError((error as Error).message);
+              } finally {
+                setLoading(false);
+              }
+            }}
+          >
+            {loading ? "Loading…" : "Load older activity"}
+          </Button>
+        </div>
       )}
     </section>
   );

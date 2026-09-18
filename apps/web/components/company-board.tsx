@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { listCompanies, workerHealth } from "@jobfinder/automation";
 import {
   candidateStatusLabel,
+  isCandidateInFlight as inFlight,
   strategyLabel,
   type CandidateStatus,
   type CrawlStrategy,
@@ -10,7 +11,7 @@ import {
 import { CompanyIntake } from "./company-intake";
 import { ActivityFeed } from "./activity-feed";
 import { api } from "./client";
-import { Button } from "./ui/button";
+import { Building2, RefreshCw, Trash2 } from "lucide-react";
 
 type Overview = {
   companies: Awaited<ReturnType<typeof listCompanies>>;
@@ -77,7 +78,7 @@ export function CompanyBoard() {
       <div className="page-heading">
         <div>
           <span className="eyebrow">COMPANIES</span>
-          <h1>Your companies. Discovery handled.</h1>
+          <h1>The employers you are tracking.</h1>
           <p>
             Add one company or import a list of organizations and domains.
             Follow discovery and scanning below.
@@ -102,19 +103,24 @@ export function CompanyBoard() {
             <h2>Company discovery</h2>
             <p>
               {companies.length} companies ·{" "}
-              {
-                companies.filter((row) =>
-                  ["Pending", "Resolving"].includes(row.candidate.status),
-                ).length
-              }{" "}
+              {companies.filter((row) => inFlight(row.candidate.status)).length}{" "}
               waiting or discovering · Updates every 2 seconds
             </p>
           </div>
         </div>
         {!overview ? (
-          <p>Loading companies…</p>
+          <p className="panel-message">Loading companies…</p>
         ) : !companies.length ? (
-          <p className="muted">No companies imported yet.</p>
+          <div className="empty-state">
+            <span className="empty-icon">
+              <Building2 size={25} />
+            </span>
+            <h3>No companies yet</h3>
+            <p>
+              Add one company above, or paste a list of organizations and
+              domains. Discovery finds each careers page and starts scanning.
+            </p>
+          </div>
         ) : (
           <div className="table-scroll">
             <table>
@@ -130,10 +136,11 @@ export function CompanyBoard() {
                 {companies.map(({ candidate, source, lastRun }) => (
                   <tr key={candidate.id}>
                     <td>
-                      <strong>{candidate.name}</strong>
+                      <span className="job-title">{candidate.name}</span>
                       <small className="cell-sub">{candidate.domain}</small>
                       {candidate.careersUrl && (
                         <a
+                          className="cell-link"
                           href={candidate.careersUrl}
                           target="_blank"
                           rel="noreferrer"
@@ -153,7 +160,7 @@ export function CompanyBoard() {
                           candidate.strategy}
                       </small>
                       {candidate.error && (
-                        <small className="cell-sub error">
+                        <small className="cell-sub is-error">
                           {candidate.error}
                         </small>
                       )}
@@ -172,7 +179,7 @@ export function CompanyBoard() {
                             filtered
                           </small>
                           {lastRun.error && (
-                            <small className="cell-sub error">
+                            <small className="cell-sub is-error">
                               {lastRun.error}
                             </small>
                           )}
@@ -185,23 +192,27 @@ export function CompanyBoard() {
                     </td>
                     <td>
                       <div className="row-actions">
-                        <Button
-                          variant="outline"
+                        <button
+                          type="button"
+                          className="icon-button-labeled"
+                          aria-label={`Retry discovery for ${candidate.name}`}
                           disabled={
-                            busy === candidate.id ||
-                            ["Pending", "Resolving"].includes(candidate.status)
+                            busy === candidate.id || inFlight(candidate.status)
                           }
                           onClick={() => void action(candidate.id, "POST")}
                         >
-                          Retry discovery
-                        </Button>
-                        <Button
-                          variant="outline"
+                          <RefreshCw size={16} />
+                          {busy === candidate.id ? "Working…" : "Retry"}
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label={`Remove ${candidate.name}`}
                           disabled={busy === candidate.id}
                           onClick={() => void action(candidate.id, "DELETE")}
                         >
-                          Remove
-                        </Button>
+                          <Trash2 size={16} />
+                        </button>
                       </div>
                     </td>
                   </tr>

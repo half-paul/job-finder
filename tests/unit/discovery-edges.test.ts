@@ -1,9 +1,9 @@
 // tests/unit/discovery-edges.test.ts
 import { describe, expect, it, vi } from "vitest";
 import {
-  createConnector,
   extractJsonLdJobs,
   jsonLdExternalId,
+  normalizeJsonLdJob,
 } from "@jobfinder/job-sources";
 import {
   createAdaptiveCareersConnector,
@@ -42,9 +42,7 @@ const query = {
 
 const normalizeCareers = (html: string) => {
   const [raw] = extractJsonLdJobs(html);
-  return createConnector("Careers", {
-    fetchImpl: fixtureFetch({ "https://acme.example/careers": html }),
-  }).normalize(raw, { query });
+  return normalizeJsonLdJob(raw, { query }, "Careers");
 };
 
 describe("JSON-LD external identity", () => {

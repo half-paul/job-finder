@@ -236,7 +236,9 @@ describe("Phase 2 source connectors", () => {
   });
 
   it("refuses to build a CapturedApi connector before replay is implemented", () => {
-    expect(() => createConnector("CapturedApi", {})).toThrow("Not implemented");
+    expect(() => createConnector("CapturedApi", {})).toThrow(
+      "Saved-API replay is not available yet",
+    );
   });
 
   it("sends a captured pattern's method and body through the fetch transport", async () => {

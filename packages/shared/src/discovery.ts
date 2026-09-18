@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+/** Waiting on the worker: neither the board nor Retry should act on these. */
+export const isCandidateInFlight = (status: string) =>
+  status === "Pending" || status === "Resolving";
+
 /** Page size for the activity feed; the client reads it to offer "load older". */
 export const activityPageLimit = 100;
 
@@ -42,14 +46,6 @@ export const supportedAts = ["Greenhouse", "Lever", "Ashby"] as const;
 export type SupportedAts = (typeof supportedAts)[number];
 export const isSupportedAts = (value: string): value is SupportedAts =>
   supportedAts.some((ats) => ats === value);
-
-/** Providers the resolver creates; users never add them by hand. */
-export const discoveryProviders = [
-  "Careers",
-  "CapturedApi",
-  "Browser",
-] as const;
-export type DiscoveryProvider = (typeof discoveryProviders)[number];
 
 export const candidateStatusLabel: Record<CandidateStatus, string> = {
   Pending: "Waiting for worker",

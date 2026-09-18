@@ -156,7 +156,7 @@ export async function deleteWatchlist(
   });
 }
 
-export async function ensureWatchlistSource(
+async function ensureWatchlistSource(
   db: AutomationDb,
   userId: string,
   input: WatchlistInput,

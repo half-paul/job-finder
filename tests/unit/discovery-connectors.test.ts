@@ -1,17 +1,11 @@
 // tests/unit/discovery-connectors.test.ts
 import { describe, expect, it } from "vitest";
 import {
-  collectPostingLinks,
   createConnector,
   extractJsonLdJobs,
+  normalizeJsonLdJob,
   providerName,
 } from "@jobfinder/job-sources";
-
-const routeFetch = (routes: Record<string, () => Response>) =>
-  (async (input: RequestInfo | URL) => {
-    const key = String(input instanceof Request ? input.url : input);
-    return routes[key]?.() ?? new Response("missing", { status: 404 });
-  }) as typeof fetch;
 
 const posting = (id: string, extra = "") => `
 <script type="application/ld+json">{
@@ -25,41 +19,7 @@ const posting = (id: string, extra = "") => `
   ${extra}
 }</script>`;
 
-describe("Phase 5 posting links and JSON-LD careers connector", () => {
-  it("collects same-host posting links only, in order, deduped", () => {
-    const html = `
-      <a href="/jobs/101-director-product">Director</a>
-      <a href="/jobs/101-director-product?ref=x">Director again</a>
-      <a href="/careers/openings/vp-eng">VP Eng</a>
-      <a href="https://other.example/jobs/5">Other</a>
-      <a href="/about">About</a>
-      <a href="/jobs">All jobs</a>`;
-    const links = collectPostingLinks(
-      html,
-      new URL("https://acme.example/careers"),
-    );
-    expect(links.map((u: URL) => u.pathname)).toEqual([
-      "/jobs/101-director-product",
-      "/careers/openings/vp-eng",
-    ]);
-  });
-
-  it("strips utm and ref tracking parameters and respects the link cap", () => {
-    const html = `<a href="/jobs/1-role?utm_source=x&ref=y&keep=1">Role</a>`;
-    const links = collectPostingLinks(
-      html,
-      new URL("https://acme.example/careers"),
-    );
-    expect(links[0].href).toBe("https://acme.example/jobs/1-role?keep=1");
-    const many = Array.from(
-      { length: 5 },
-      (_, i) => `<a href="/jobs/${i}-role">Role ${i}</a>`,
-    ).join("");
-    expect(
-      collectPostingLinks(many, new URL("https://acme.example/careers"), 2),
-    ).toHaveLength(2);
-  });
-
+describe("Phase 5 JSON-LD normalization", () => {
   it("reads salary, remote type and applicant countries from JSON-LD", async () => {
     const html = posting(
       "7",
@@ -70,18 +30,13 @@ describe("Phase 5 posting links and JSON-LD careers connector", () => {
        "validThrough":"2026-12-31"`,
     );
     const [raw] = extractJsonLdJobs(html);
-    const connector = createConnector("Careers", {
-      fetchImpl: routeFetch({
-        "https://acme.example/careers": () => new Response(html),
-      }),
-    });
     const query = {
       board: "acme.example",
       terms: [],
       company: "Acme",
       sourceUrl: "https://acme.example/careers",
     };
-    const normalized = await connector.normalize(raw, { query });
+    const normalized = await normalizeJsonLdJob(raw, { query }, "Careers");
     expect(normalized).toMatchObject({
       provider: "Careers",
       workType: "Remote",
@@ -92,58 +47,6 @@ describe("Phase 5 posting links and JSON-LD careers connector", () => {
       country: "CA",
     });
     expect(normalized.location).toContain("Canada");
-  });
-
-  it("walks a listing page that only links to posting pages", async () => {
-    const fetchImpl = routeFetch({
-      "https://acme.example/careers": () =>
-        new Response(`<a href="/jobs/1">One</a><a href="/jobs/2">Two</a>`),
-      "https://acme.example/jobs/1": () => new Response(posting("1")),
-      "https://acme.example/jobs/2": () =>
-        new Response("<p>no structured data</p>"),
-    });
-    const connector = createConnector("Careers", { fetchImpl });
-    const query = {
-      board: "acme.example",
-      terms: [],
-      company: "Acme",
-      sourceUrl: "https://acme.example/careers",
-    };
-    const page = await connector.search(query);
-    expect(page.complete).toBe(true);
-    expect(page.jobs.map((j) => j.externalId)).toEqual([
-      "https://acme.example/jobs/1",
-      "https://acme.example/jobs/2",
-    ]);
-    const raw = await connector.fetchJob(page.jobs[0]);
-    expect((await connector.normalize(raw, { query })).title).toBe(
-      "Director of Product 1",
-    );
-    await expect(connector.fetchJob(page.jobs[1])).rejects.toThrow(
-      /no JobPosting/,
-    );
-  });
-
-  it("does not list a posting link that duplicates an inline JSON-LD job", async () => {
-    const html =
-      posting("1") +
-      `<a href="/jobs/1">Director of Product</a><a href="/jobs/2">Other role</a>`;
-    const connector = createConnector("Careers", {
-      fetchImpl: routeFetch({
-        "https://acme.example/careers": () => new Response(html),
-      }),
-    });
-    const page = await connector.search({
-      board: "acme.example",
-      terms: [],
-      sourceUrl: "https://acme.example/careers",
-    });
-    expect(
-      page.jobs.filter((j) => j.url === "https://acme.example/jobs/1"),
-    ).toHaveLength(1);
-    expect(page.jobs.map((j) => j.url)).toContain(
-      "https://acme.example/jobs/2",
-    );
   });
 
   it("falls back to a single salary value, classifies employment type, and reads array-form location fields", async () => {
@@ -162,11 +65,7 @@ describe("Phase 5 posting links and JSON-LD careers connector", () => {
       terms: [],
       sourceUrl: "https://acme.example/careers",
     };
-    const normalized = await createConnector("Careers", {
-      fetchImpl: routeFetch({
-        "https://acme.example/careers": () => new Response(html),
-      }),
-    }).normalize(raw, { query });
+    const normalized = await normalizeJsonLdJob(raw, { query }, "Careers");
     expect(normalized).toMatchObject({
       salaryMin: 95000,
       salaryMax: 95000,
@@ -188,17 +87,17 @@ describe("Phase 5 posting links and JSON-LD careers connector", () => {
          "value":{"@type":"QuantitativeValue","value":"Competitive","unitText":"YEAR"}}`,
     );
     const [raw] = extractJsonLdJobs(html);
-    const normalized = await createConnector("Careers", {
-      fetchImpl: routeFetch({
-        "https://acme.example/careers": () => new Response(html),
-      }),
-    }).normalize(raw, {
-      query: {
-        board: "acme.example",
-        terms: [],
-        sourceUrl: "https://acme.example/careers",
+    const normalized = await normalizeJsonLdJob(
+      raw,
+      {
+        query: {
+          board: "acme.example",
+          terms: [],
+          sourceUrl: "https://acme.example/careers",
+        },
       },
-    });
+      "Careers",
+    );
     expect(normalized.salaryMin).toBeNull();
     expect(normalized.salaryMax).toBeNull();
   });
@@ -209,17 +108,17 @@ describe("Phase 5 posting links and JSON-LD careers connector", () => {
       `,"baseSalary":{"@type":"MonetaryAmount","currency":"XYZ","value":{"minValue":1,"maxValue":2}}`,
     );
     const [raw] = extractJsonLdJobs(html);
-    const normalized = await createConnector("Careers", {
-      fetchImpl: routeFetch({
-        "https://acme.example/careers": () => new Response(html),
-      }),
-    }).normalize(raw, {
-      query: {
-        board: "acme.example",
-        terms: [],
-        sourceUrl: "https://acme.example/careers",
+    const normalized = await normalizeJsonLdJob(
+      raw,
+      {
+        query: {
+          board: "acme.example",
+          terms: [],
+          sourceUrl: "https://acme.example/careers",
+        },
       },
-    });
+      "Careers",
+    );
     expect(normalized.currency).toBe("Unknown");
   });
 

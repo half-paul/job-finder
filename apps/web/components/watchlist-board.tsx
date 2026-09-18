@@ -4,9 +4,9 @@ import { useRouter } from "next/navigation";
 import { Bookmark, Trash2, RefreshCw } from "lucide-react";
 import { watchlistPriorities, type WatchlistPriority } from "@jobfinder/shared";
 import type { watchlist } from "../lib/automation";
+import Link from "next/link";
 import { api } from "./client";
 import { Button } from "./ui/button";
-import { CompanyIntake } from "./company-intake";
 import { ActivityFeed } from "./activity-feed";
 
 type Entry = Awaited<ReturnType<typeof watchlist.list>>[number];
@@ -43,14 +43,17 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
     }
   }
 
-  async function handleScanSource(sourceId: string) {
+  const isScanning = (entry: Entry) =>
+    busy === entry.id ||
+    (entry.source ? scanningSource.has(entry.source.id) : false);
+
+  async function handleScanSource(sourceId: string, refresh = true) {
     setScanningSource((prev) => new Set(prev).add(sourceId));
     try {
       await api(`sources/${sourceId}`, "POST");
-      // Refresh to update the UI with latest scan results
-      router.refresh();
-    } catch (err) {
-      setError((err as Error).message);
+      if (refresh) router.refresh();
+    } catch (error) {
+      setError((error as Error).message);
     } finally {
       setScanningSource((prev) => {
         const next = new Set(prev);
@@ -71,8 +74,11 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
     setScanningAll(true);
     try {
       for (const sourceId of sourceIds) {
-        await handleScanSource(sourceId);
+        await handleScanSource(sourceId, false);
       }
+      // One refetch for the batch: refreshing per source re-ran the whole
+      // page's server queries once per company.
+      router.refresh();
     } finally {
       setScanningAll(false);
     }
@@ -85,12 +91,14 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
           <span className="eyebrow">COMPANIES TO WATCH</span>
           <h1>Keep an eye on the employers that matter.</h1>
           <p>
-            Add a name and website, or import organizations in bulk. The worker
-            finds careers pages and chooses how to read their job listings.
+            Scan the employers you are tracking, or{" "}
+            <Link className="inline-link" href="/companies">
+              add and import companies
+            </Link>{" "}
+            to have their careers pages discovered.
           </p>
         </div>
       </div>
-      <CompanyIntake onImported={() => router.refresh()} />
       {error && (
         <p className="error" role="alert">
           {error}
@@ -109,17 +117,17 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
               {entries.length} {entries.length === 1 ? "company" : "companies"}.
               Remove an entry to stop scanning it directly.
             </p>
-            {entries.length > 0 && (
-              <Button
-                type="button"
-                variant="outline"
-                onClick={handleScanAll}
-                disabled={scanningAll}
-              >
-                {scanningAll ? "Scanning all…" : "Scan all"}
-              </Button>
-            )}
           </div>
+          {entries.length > 0 && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => void handleScanAll()}
+              disabled={scanningAll}
+            >
+              {scanningAll ? "Scanning all…" : "Scan all"}
+            </Button>
+          )}
         </div>
         {entries.length ? (
           <div className="table-scroll">
@@ -194,22 +202,14 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
                         type="button"
                         className="icon-button-labeled"
                         aria-label={`Scan ${entry.company} now`}
-                        disabled={
-                          !entry.source ||
-                          busy === entry.id ||
-                          scanningSource.has(entry.source?.id ?? "")
-                        }
+                        disabled={!entry.source || isScanning(entry)}
                         onClick={() => {
-                          if (entry.source?.id) {
-                            handleScanSource(entry.source.id);
-                          }
+                          if (entry.source?.id)
+                            void handleScanSource(entry.source.id);
                         }}
                       >
                         <RefreshCw size={16} />
-                        {busy === entry.id ||
-                        scanningSource.has(entry.source?.id ?? "")
-                          ? "Scanning…"
-                          : "Scan"}
+                        {isScanning(entry) ? "Scanning…" : "Scan"}
                       </button>
                       <button
                         type="button"

@@ -47,7 +47,7 @@ export function CompanyIntake({ onImported }: { onImported?: () => void }) {
           </p>
         </div>
       </div>
-      <div className="form-actions company-tabs">
+      <div className="company-tabs">
         <Button
           type="button"
           variant={mode === "single" ? "default" : "outline"}
@@ -135,7 +135,7 @@ export function CompanyIntake({ onImported }: { onImported?: () => void }) {
             </label>
           </>
         )}
-        <div className="form-actions">
+        <div className="form-actions full-width">
           <Button disabled={busy}>
             {busy
               ? "Queuing…"
@@ -155,7 +155,9 @@ export function CompanyIntake({ onImported }: { onImported?: () => void }) {
           <p>
             {result.imported} queued · {result.duplicates} already imported ·{" "}
             {result.rejected.length} rows skipped.{" "}
-            <Link href="/companies">View discovery progress</Link>
+            <Link className="inline-link" href="/companies">
+              View discovery progress
+            </Link>
           </p>
           {!!result.rejected.length && (
             <ul>

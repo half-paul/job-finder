@@ -417,7 +417,7 @@ test("company UI adds with two fields, uploads CSV and shows persisted progress"
   try {
     await page.goto("/companies");
     await expect(
-      page.getByRole("heading", { name: "Your companies. Discovery handled." }),
+      page.getByRole("heading", { name: "The employers you are tracking." }),
     ).toBeVisible();
     await page.getByLabel("Company name", { exact: true }).fill("UI Fixture");
     await page.getByLabel("Website or careers URL").fill("ui-fixture.example");
