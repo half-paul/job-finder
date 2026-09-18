@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./client";
 import { Button } from "./ui/button";
 
@@ -19,28 +19,52 @@ export function ActivityFeed({ candidateId }: { candidateId?: string }) {
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const path = `activity${candidateId ? `?candidateId=${encodeURIComponent(candidateId)}` : ""}`;
+  // Loading older history must not restart the poll, so its length is read
+  // through a ref instead of becoming an effect dependency.
+  const olderCount = useRef(0);
+  useEffect(() => {
+    olderCount.current = older.length;
+  }, [older.length]);
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
+    let failures = 0;
     async function refresh() {
+      // A hidden tab keeps its data but stops asking for more until it is
+      // looked at again; a failing endpoint is backed off rather than polled.
+      if (document.visibilityState === "hidden") {
+        if (active && !paused) timer = setTimeout(() => void refresh(), 2000);
+        return;
+      }
       try {
         const result = await api<Activity[]>(path);
+        failures = 0;
         if (active) {
           setEvents(result);
           setError("");
-          if (!older.length) setHasMore(result.length === 100);
+          if (!olderCount.current) setHasMore(result.length === 100);
         }
       } catch (error) {
+        failures++;
         if (active) setError((error as Error).message);
       }
-      if (active && !paused) timer = setTimeout(() => void refresh(), 2000);
+      const delay = Math.min(2000 * 2 ** Math.min(failures, 5), 60_000);
+      if (active && !paused) timer = setTimeout(() => void refresh(), delay);
+    }
+    function onVisible() {
+      if (document.visibilityState === "visible" && active && !paused) {
+        clearTimeout(timer);
+        void refresh();
+      }
     }
     void refresh();
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       active = false;
       clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [path, paused, older.length]);
+  }, [path, paused]);
   const all = [
     ...new Map(
       [...events, ...older].map((event) => [event.id, event]),
