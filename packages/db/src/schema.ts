@@ -341,6 +341,7 @@ export const companyCandidates = pgTable(
     /** Registrable domain, lowercase. One candidate per domain per user. */
     domain: text().notNull(),
     origin: text().notNull().default("seed"),
+    websiteUrl: text("website_url"),
     status: text().notNull().default("Pending"),
     careersUrl: text("careers_url"),
     ats: text(),
@@ -423,3 +424,26 @@ export const automationState = pgTable("automation_state", {
     .defaultNow()
     .notNull(),
 });
+
+/** Durable, owner-scoped progress. Never store credentials or page contents. */
+export const activityEvents = pgTable(
+  "activity_events",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    candidateId: uuid("candidate_id").references(() => companyCandidates.id, {
+      onDelete: "cascade",
+    }),
+    sourceId: uuid("source_id").references(() => jobSources.id, {
+      onDelete: "cascade",
+    }),
+    runId: uuid("run_id"),
+    actor: text().notNull(),
+    stage: text().notNull(),
+    level: text().notNull().default("info"),
+    message: text().notNull(),
+    estimatedCostMicros: integer("estimated_cost_micros").notNull().default(0),
+    createdAt: createdAt(),
+  },
+  (t) => [index("activity_owner_created_idx").on(t.userId, t.createdAt)],
+);
