@@ -155,9 +155,41 @@ test("source management validates allowlists and keeps sources user-scoped", asy
       })
     ).status(),
   ).toBe(400);
+  // A global feed carries no board; an employer board is rejected without one.
+  const feed = await request.post("/api/sources", {
+    headers,
+    data: { provider: "Remotive", board: "", company: "" },
+  });
+  expect(feed.status(), await feed.text()).toBe(201);
+  expect(await feed.json()).toMatchObject({
+    provider: "Remotive",
+    board: "remotive",
+    company: "Remotive",
+  });
+  expect(
+    (
+      await request.post("/api/sources", {
+        headers,
+        data: { provider: "Workable", board: "", company: "Blueground" },
+      })
+    ).status(),
+  ).toBe(400);
+  const named = await request.post("/api/sources", {
+    headers,
+    data: { provider: "Workable", board: "blueground", company: "Blueground" },
+  });
+  expect(named.status(), await named.text()).toBe(201);
   const sources = await (await request.get("/api/sources")).json();
-  expect(sources).toHaveLength(1);
-  expect(sources[0].source).toMatchObject({
+  expect(sources).toHaveLength(3);
+  expect(
+    sources.map((row: { source: { provider: string } }) => row.source.provider),
+  ).toEqual(expect.arrayContaining(["Greenhouse", "Remotive", "Workable"]));
+  expect(
+    sources.find(
+      (row: { source: { provider: string } }) =>
+        row.source.provider === "Greenhouse",
+    ).source,
+  ).toMatchObject({
     provider: "Greenhouse",
     board: "example",
     company: "Example Inc.",

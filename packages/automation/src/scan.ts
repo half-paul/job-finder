@@ -109,6 +109,23 @@ export async function scanSourceRecord(
   }
 }
 
+/**
+ * Minimum gap between successful scans for providers that publish a rate limit.
+ * A schedule may be set to Hourly for any source, so the limit is enforced here
+ * rather than left to the schedule the user picked.
+ */
+const minScanIntervalMs: Record<string, number> = {
+  Jobicy: 3_600_000,
+  // Remotive's API notice asks for at most four calls a day and states that
+  // excessive requests are blocked and access can be terminated.
+  Remotive: 6 * 3_600_000,
+};
+
+const scanIntervalReason: Record<string, string> = {
+  Jobicy: "This feed refreshes at most once per hour.",
+  Remotive: "This feed refreshes at most once every six hours.",
+};
+
 export async function scanSourceWithDb(
   options: ScanSourceOptions,
   db: AutomationDb,
@@ -121,7 +138,8 @@ export async function scanSourceWithDb(
     .where(and(eq(jobSources.id, sourceId), eq(jobSources.ownerId, userId)));
   if (!source) throw new AppError(404, "Source not found.");
   if (!source.enabled) throw new AppError(409, "This source is disabled.");
-  if (source.provider === "Jobicy") {
+  const throttle = minScanIntervalMs[source.provider];
+  if (throttle) {
     const [previous] = await db
       .select()
       .from(searchRuns)
@@ -133,7 +151,7 @@ export async function scanSourceWithDb(
       )
       .orderBy(desc(searchRuns.startedAt))
       .limit(1);
-    if (previous && Date.now() - previous.startedAt.getTime() < 3_600_000)
+    if (previous && Date.now() - previous.startedAt.getTime() < throttle)
       return {
         ...previous,
         id: options.runId ?? previous.id,
@@ -142,7 +160,7 @@ export async function scanSourceWithDb(
         removed: 0,
         filtered: 0,
         warnings: [
-          "Using the latest Jobicy scan. This feed refreshes at most once per hour.",
+          `Using the latest ${source.provider} scan. ${scanIntervalReason[source.provider]}`,
         ],
       };
   }

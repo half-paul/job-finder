@@ -2,7 +2,11 @@ import {
   extractJsonLdJobs,
   type TransportOptions,
 } from "@jobfinder/job-sources";
-import { isSupportedAts, type PolicyCheck } from "@jobfinder/shared";
+import {
+  isSupportedAts,
+  type PolicyCheck,
+  type SupportedAts,
+} from "@jobfinder/shared";
 import { detectAts } from "./ats";
 import { findCareersPage, scoreCareersLinks } from "./careers";
 import { registrableDomain } from "./seed-list";
@@ -17,7 +21,7 @@ export interface DiscoveryOptions extends TransportOptions {
 }
 export interface Resolution {
   careersUrl: string;
-  provider: "Greenhouse" | "Lever" | "Ashby" | "Careers";
+  provider: SupportedAts | "Careers";
   board: string;
   strategy: "ats" | "json-ld" | "ai";
   ats: string | null;

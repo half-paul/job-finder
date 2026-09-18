@@ -8,6 +8,7 @@ import Link from "next/link";
 import { api } from "./client";
 import { Button } from "./ui/button";
 import { ActivityFeed } from "./activity-feed";
+import { providerName } from "../lib/display";
 
 type Entry = Awaited<ReturnType<typeof watchlist.list>>[number];
 
@@ -180,7 +181,9 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
                     <td>
                       {entry.source ? (
                         <>
-                          <span className="tag">{entry.source.provider}</span>
+                          <span className="tag">
+                            {providerName(entry.source.provider)}
+                          </span>
                           <small className="cell-sub">
                             {entry.source.board} ·{" "}
                             {entry.source.enabled ? "enabled" : "disabled"}

@@ -7,6 +7,7 @@ import type { automation } from "../lib/automation";
 import { ActivityFeed } from "./activity-feed";
 import { api } from "./client";
 import { Button } from "./ui/button";
+import { providerName } from "../lib/display";
 
 type Overview = Awaited<ReturnType<typeof automation.overview>>;
 type Digest = Awaited<ReturnType<typeof automation.digest>>["digest"];
@@ -154,7 +155,8 @@ export function AutomationBoard({ overview }: { overview: Overview }) {
                     <td>
                       <span className="job-title">{source.company}</span>
                       <small className="cell-sub">
-                        {source.provider} · {source.board}
+                        {providerName(source.provider)}
+                        {source.board ? ` · ${source.board}` : ""}
                       </small>
                     </td>
                     <td>

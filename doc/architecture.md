@@ -19,7 +19,7 @@ flowchart TD
   Maintenance --> DB
   Alerts --> DB
   Worker --> Discovery[Company discovery and career URL finder, Phase 5]
-  Discovery --> Detector[ATS detector: Greenhouse, Lever, Ashby, Workday, SmartRecruiters, custom]
+  Discovery --> Detector[ATS detector: Greenhouse, Lever, Ashby, Workable, Personio, SmartRecruiters, Rippling, Workday, custom]
   Detector --> Sources[Permitted ATS APIs and feeds, Phase 2]
   Detector --> Crawler[Isolated browser crawler and saved API patterns, Phase 5]
   Sources --> Extract[Job extractor: API payload, JSON-LD, HTML, bounded AI]
@@ -38,7 +38,7 @@ flowchart TD
 - `apps/web`: Next.js pages, route handlers, server-only auth and application services, reusable UI.
 - `packages/db`: typed schema, versioned SQL migrations, database connection and migration command.
 - `packages/shared`: Zod input schemas, profile/preferences and job contracts.
-- `packages/job-sources`: source connector contract; multi-employer RemoteOK and Jobicy feeds plus employer-specific Greenhouse, Lever, Ashby and allowlisted JSON-LD adapters.
+- `packages/job-sources`: source connector contract; multi-employer RemoteOK, Jobicy, Remotive, The Muse, Himalayas, We Work Remotely, USAJOBS and Adzuna feeds plus employer-specific Greenhouse, Lever, Ashby, Workable, Personio, SmartRecruiters, Rippling and allowlisted JSON-LD adapters.
 - `packages/matching`: deterministic filters/aggregation, embedding client/cache contracts and structured AI evaluation.
 - `packages/automation`: the server-side service layer shared by the web app and the worker — the source scan engine, the bounded evaluation batch, watchlists, alerts, the daily digest, schedule math, expired-row cleanup and automation diagnostics. It imports no Next.js code, so `apps/worker` reuses it unchanged.
 - `packages/discovery` (Phase 5): company discovery, career URL finder, ATS detector, structured location normalizer and the discovery transport. Depends on `packages/job-sources` for connectors; never the reverse.
@@ -107,9 +107,9 @@ Discovery uses GET/POST `/api/sources` and POST `/api/sources/:id`; matching use
 
 ## Connector contract and source policy
 
-`SourceConnector` exposes `search(query, cursor, signal)`, `fetchJob(reference, signal)`, and `normalize(raw)`. Search returns a validated page plus continuation, conditional-fetch and removal-safety metadata. Board identity is configuration, never an arbitrary fetch URL. Normalized jobs retain provider, external ID, original URL, timestamps and unknown values explicitly. Discovery uses Greenhouse, Lever and Ashby board APIs, RemoteOK and Jobicy multi-employer feeds, and allowlisted JSON-LD pages.
+`SourceConnector` exposes `search(query, cursor, signal)`, `fetchJob(reference, signal)`, and `normalize(raw)`. Search returns a validated page plus continuation, conditional-fetch and removal-safety metadata. Board identity is configuration, never an arbitrary fetch URL. Normalized jobs retain provider, external ID, original URL, timestamps and unknown values explicitly. Discovery uses Greenhouse, Lever, Ashby, Workable, Personio, SmartRecruiters and Rippling board APIs, the RemoteOK, Jobicy, Remotive, The Muse, Himalayas, We Work Remotely, USAJOBS and Adzuna multi-employer feeds, and allowlisted JSON-LD pages.
 
-Retrieval follows a fixed preference ladder: official ATS API, then Schema.org `JobPosting` JSON-LD, then plain HTTP fetch of a discovered JSON endpoint, then an isolated browser crawl, and only last a bounded AI-directed browser session. Each company records which rung it uses in `companies.crawl_strategy`, and a cheaper rung discovered later replaces a costlier one. The ATS detector recognises `boards.greenhouse.io`, `job-boards.greenhouse.io`, `jobs.lever.co`, `jobs.ashbyhq.com`, `*.myworkdayjobs.com`, `jobs.smartrecruiters.com`, `*.icims.com` and `*.taleo.net` from redirects, links, iframes and script requests, and stores `{ ats, ats_key }` so the matching connector runs without a browser. Discovery is a one-time cost per company; refreshes reuse the stored strategy until it fails.
+Retrieval follows a fixed preference ladder: official ATS API, then Schema.org `JobPosting` JSON-LD, then plain HTTP fetch of a discovered JSON endpoint, then an isolated browser crawl, and only last a bounded AI-directed browser session. Each company records which rung it uses in `companies.crawl_strategy`, and a cheaper rung discovered later replaces a costlier one. The ATS detector recognises `boards.greenhouse.io`, `job-boards.greenhouse.io`, `jobs.lever.co`, `jobs.ashbyhq.com`, `apply.workable.com`, `*.jobs.personio.de`, `*.jobs.personio.com`, `ats.rippling.com`, `*.myworkdayjobs.com`, `jobs.smartrecruiters.com`, `*.icims.com` and `*.taleo.net` from redirects, links, iframes and script requests, and stores `{ ats, ats_key }` so the matching connector runs without a browser. Discovery is a one-time cost per company; refreshes reuse the stored strategy until it fails.
 
 Maintain a provider registry with approved hosts, API/access documentation, request budget, and disable switch. Respect terms, robots and rate limits; no CAPTCHA/authentication bypass. Honor Retry-After, cache ETags/Last-Modified, time out fetches, cap bytes and pages, prevent private-IP/redirect SSRF, and use deterministic fixture tests. Fetch failures must not mark all jobs removed; lifecycle updates require a successful complete scan. Prefer original ATS provenance. Ashby may need jobUrl-derived identity because its documented public payload has no guaranteed ID.
 
@@ -154,7 +154,7 @@ Implement the workspace, database migration, real authentication, private profil
 
 ### Phase 2 — discovery (implemented)
 
-Implemented connectors for the official Greenhouse and Lever APIs, Ashby's public posting API, RemoteOK's permitted feed, Jobicy's multi-employer feed, and allowlisted JSON-LD `JobPosting` pages. The transport is HTTPS-only, fixed-host, redirect-rejecting, DNS-pinned, size/time bounded, and rejects non-public addresses. Provider payloads are Zod-validated and normalized without inventing missing values; HTML becomes bounded text. User-triggered scans upsert canonical jobs, retain provider/external-ID provenance, update changed descriptions, and isolate per-job failures. Complete employer-owned feeds mark disappearances after a complete scan; rolling multi-employer feeds never mark removals. Resumable scheduling remains in Phase 4.
+Implemented connectors for the official Greenhouse and Lever APIs, Ashby's public posting API, the Workable, Personio, SmartRecruiters and Rippling board APIs, the RemoteOK, Jobicy, Remotive, The Muse, Himalayas and We Work Remotely feeds, the credentialed USAJOBS and Adzuna search APIs, and allowlisted JSON-LD `JobPosting` pages. The transport is HTTPS-only, fixed-host, redirect-rejecting, DNS-pinned, size/time bounded, and rejects non-public addresses. Provider payloads are Zod-validated and normalized without inventing missing values; HTML becomes bounded text. User-triggered scans upsert canonical jobs, retain provider/external-ID provenance, update changed descriptions, and isolate per-job failures. Complete employer-owned feeds mark disappearances after a complete scan; rolling multi-employer feeds never mark removals. Resumable scheduling remains in Phase 4.
 
 ### Phase 3 — matching (current)
 

@@ -34,6 +34,9 @@ export const detectableAts = [
   "Greenhouse",
   "Lever",
   "Ashby",
+  "Workable",
+  "Personio",
+  "Rippling",
   "Workday",
   "SmartRecruiters",
   "iCIMS",
@@ -42,7 +45,15 @@ export const detectableAts = [
 export type DetectableAts = (typeof detectableAts)[number];
 
 /** Vendors with a connector today. The rest are recorded as Unsupported. */
-export const supportedAts = ["Greenhouse", "Lever", "Ashby"] as const;
+export const supportedAts = [
+  "Greenhouse",
+  "Lever",
+  "Ashby",
+  "Workable",
+  "Personio",
+  "SmartRecruiters",
+  "Rippling",
+] as const;
 export type SupportedAts = (typeof supportedAts)[number];
 export const isSupportedAts = (value: string): value is SupportedAts =>
   supportedAts.some((ats) => ats === value);

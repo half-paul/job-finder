@@ -194,6 +194,7 @@ import {
   RobotsBlockedError,
   RobotsCache,
   discoveryFetch,
+  discoveryUserAgent,
 } from "@jobfinder/discovery";
 
 /** Routes by URL string; unknown URLs return 404. */
@@ -310,7 +311,7 @@ describe("Phase 5 discovery transport", () => {
     expect(check).toMatchObject({
       robotsAllowed: false,
       robotsUrl: "https://c.example/robots.txt",
-      userAgent: "JobFinderBot/1.0",
+      userAgent: "JobFinder/1.0",
       matchedRule: "Disallow: /careers",
     });
   });
@@ -512,5 +513,64 @@ describe("Phase 5 ATS detector", () => {
     expect(
       at("https://api.ashbyhq.com/posting-api/job-board/acme", "<p>x</p>"),
     ).toBeNull();
+  });
+});
+
+/**
+ * Akamai Bot Manager (lululemon, and every other site behind it) resets the
+ * connection for any user agent containing "bot" or "curl" before sending a
+ * response, so a request never fails fast — it hangs until the fetch timeout.
+ * Discovery must identify itself without a token those filters match.
+ */
+describe("Phase 5 discovery user agent", () => {
+  it("identifies itself without a token bot filters reject", () => {
+    expect(discoveryUserAgent).toBe("JobFinder/1.0");
+    expect(discoveryUserAgent).not.toMatch(/bot|crawler|spider|curl/i);
+  });
+
+  it("sends that user agent on robots.txt and on page fetches", async () => {
+    const seen: { url: string; agent: string | null }[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      seen.push({
+        url,
+        agent: new Headers(init?.headers).get("user-agent"),
+      });
+      return url.endsWith("/robots.txt")
+        ? new Response("User-agent: *\nDisallow: /private\n")
+        : new Response("<p>ok</p>");
+    }) as typeof fetch;
+    await discoveryFetch(new URL("https://ua.example/careers"), {
+      fetchImpl,
+      resolveHost: publicHost,
+      robots: new RobotsCache({ fetchImpl, resolveHost: publicHost }),
+    });
+    expect(seen.map((entry) => entry.url)).toEqual([
+      "https://ua.example/robots.txt",
+      "https://ua.example/careers",
+    ]);
+    for (const entry of seen) expect(entry.agent).toBe("JobFinder/1.0");
+  });
+
+  it("honours a robots group named for its own agent token", async () => {
+    const rules = parseRobots(
+      "User-agent: *\nAllow: /\n\nUser-agent: JobFinder\nDisallow: /careers\n",
+    );
+    const token = discoveryUserAgent.split("/")[0];
+    expect(robotsAllows(rules, "/careers", token)).toEqual({
+      allowed: false,
+      matchedRule: "Disallow: /careers",
+    });
+  });
+
+  it("reports the same agent in the recorded policy check", async () => {
+    const fetchImpl = routeFetch({
+      "https://ua2.example/robots.txt": () =>
+        new Response("User-agent: *\nDisallow: /careers\n"),
+    });
+    const robots = new RobotsCache({ fetchImpl, resolveHost: publicHost });
+    expect(
+      await robots.check(new URL("https://ua2.example/careers")),
+    ).toMatchObject({ robotsAllowed: false, userAgent: "JobFinder/1.0" });
   });
 });

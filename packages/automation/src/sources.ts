@@ -1,5 +1,6 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { jobSources, searchRuns } from "@jobfinder/db";
+import { personioBoardHost } from "@jobfinder/job-sources";
 import {
   AppError,
   isGlobalSource,
@@ -54,6 +55,18 @@ export async function createSource(
     .split(",")
     .map((host) => host.trim().toLowerCase())
     .filter(Boolean);
+  // A Personio board becomes the request hostname, so it is validated here as
+  // well as in the connector: an invalid board must never reach a stored source.
+  if (input.provider === "Personio") {
+    try {
+      personioBoardHost(input.board);
+    } catch {
+      throw new AppError(
+        400,
+        "Personio board must be a subdomain or a jobs.personio.de/.com hostname.",
+      );
+    }
+  }
   if (input.provider === "JSON-LD") {
     if (!allowedHosts.length)
       throw new AppError(

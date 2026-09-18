@@ -571,10 +571,18 @@ small {
 .results-meta {
   padding: 18px 25px;
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   justify-content: space-between;
   align-items: center;
   font-size: 10px;
   color: var(--muted);
+}
+.results-meta > span[aria-live] {
+  min-width: 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
 }
 .results-meta label {
   display: flex;

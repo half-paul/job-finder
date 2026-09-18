@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { z } from "zod";
-import { jobInputSchema } from "@jobfinder/shared";
+import { jobInputSchema, maxSalary } from "@jobfinder/shared";
 import {
   fetchText,
   retryAfterMs,
@@ -12,16 +12,28 @@ import {
   crawlerClientFromEnv,
   type CrawlerClient,
 } from "./crawler-client";
+import { parseXml } from "./xml";
 
 export * from "./transport";
+export { parseXml, toArray, text } from "./xml";
 export type { CrawlerClient } from "./crawler-client";
 
 export type SourceProvider =
   | "Greenhouse"
   | "Lever"
   | "Ashby"
+  | "Workable"
+  | "Personio"
+  | "SmartRecruiters"
+  | "Rippling"
   | "RemoteOK"
   | "Jobicy"
+  | "Remotive"
+  | "TheMuse"
+  | "Himalayas"
+  | "WeWorkRemotely"
+  | "USAJOBS"
+  | "Adzuna"
   | "JSON-LD"
   | "Careers"
   | "CapturedApi"
@@ -122,6 +134,34 @@ export function isoDate(value: string | null | undefined): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+/**
+ * Feed salaries arrive as floats, formatted strings and free text. Only a clean
+ * magnitude inside the schema bounds is kept; anything with a range separator,
+ * a suffix or stray punctuation becomes null instead of a fabricated number.
+ */
+export function salaryInt(value: unknown): number | null {
+  const raw =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value.trim())
+        ? Number(value.trim())
+        : Number.NaN;
+  if (!Number.isFinite(raw) || raw <= 0 || raw > maxSalary) return null;
+  return Math.round(raw);
+}
+
+/** Keeps the pair ordered so a reversed feed range never fails schema validation. */
+export function salaryRange(
+  min: unknown,
+  max: unknown,
+): { salaryMin: number | null; salaryMax: number | null } {
+  const low = salaryInt(min);
+  const high = salaryInt(max);
+  if (low !== null && high !== null && low > high)
+    return { salaryMin: high, salaryMax: low };
+  return { salaryMin: low, salaryMax: high };
+}
+
 export async function fetchJson(
   url: URL,
   options: TransportOptions,
@@ -150,6 +190,34 @@ export async function fetchJson(
   }
 }
 
+export async function fetchXml(
+  url: URL,
+  options: TransportOptions,
+  headers: Record<string, string> = {},
+): Promise<{
+  data: unknown;
+  status: number;
+  etag?: string;
+  lastModified?: string;
+}> {
+  const { response, text } = await fetchText(url, headers, options);
+  const metadata = {
+    etag: response.headers.get("etag") ?? undefined,
+    lastModified: response.headers.get("last-modified") ?? undefined,
+  };
+  if (response.status === 304) return { data: null, status: 304, ...metadata };
+  if (!response.ok)
+    throw new SourceHttpError(
+      response.status,
+      retryAfterMs(response.headers.get("retry-after")),
+    );
+  try {
+    return { data: parseXml(text), status: response.status, ...metadata };
+  } catch {
+    throw new Error(`Source returned invalid XML from ${url.hostname}`);
+  }
+}
+
 export function providerName(value: string): SourceProvider {
   const normalized = value.trim().toLowerCase();
   if (normalized === "greenhouse") return "Greenhouse";
@@ -157,6 +225,22 @@ export function providerName(value: string): SourceProvider {
   if (normalized === "ashby") return "Ashby";
   if (normalized === "remoteok" || normalized === "remote-ok")
     return "RemoteOK";
+  if (normalized === "workable") return "Workable";
+  if (normalized === "personio") return "Personio";
+  if (normalized === "smartrecruiters" || normalized === "smart-recruiters")
+    return "SmartRecruiters";
+  if (normalized === "rippling") return "Rippling";
+  if (normalized === "remotive") return "Remotive";
+  if (normalized === "themuse" || normalized === "the-muse") return "TheMuse";
+  if (normalized === "himalayas") return "Himalayas";
+  if (
+    normalized === "weworkremotely" ||
+    normalized === "we-work-remotely" ||
+    normalized === "wwr"
+  )
+    return "WeWorkRemotely";
+  if (normalized === "usajobs" || normalized === "usa-jobs") return "USAJOBS";
+  if (normalized === "adzuna") return "Adzuna";
   if (normalized === "json-ld" || normalized === "jsonld") return "JSON-LD";
   if (normalized === "jobicy") return "Jobicy";
   if (normalized === "careers") return "Careers";
@@ -177,6 +261,26 @@ export function createConnector(
       return createLeverConnector(options);
     case "Ashby":
       return createAshbyConnector(options);
+    case "Workable":
+      return createWorkableConnector(options);
+    case "Personio":
+      return createPersonioConnector(options);
+    case "SmartRecruiters":
+      return createSmartRecruitersConnector(options);
+    case "Rippling":
+      return createRipplingConnector(options);
+    case "Remotive":
+      return createRemotiveConnector(options);
+    case "TheMuse":
+      return createTheMuseConnector(options);
+    case "Himalayas":
+      return createHimalayasConnector(options);
+    case "WeWorkRemotely":
+      return createWeWorkRemotelyConnector(options);
+    case "USAJOBS":
+      return createUsaJobsConnector(options);
+    case "Adzuna":
+      return createAdzunaConnector(options);
     case "RemoteOK":
       return createRemoteOkConnector(options);
     case "JSON-LD":
@@ -200,22 +304,44 @@ export function createConnector(
 }
 
 import {
+  createAdzunaConnector,
   createAshbyConnector,
   createBrowserConnector,
   createGreenhouseConnector,
+  createHimalayasConnector,
   createJsonLdConnector,
   createLeverConnector,
+  createPersonioConnector,
+  personioBoardHost,
   createRemoteOkConnector,
+  createRemotiveConnector,
+  createRipplingConnector,
+  createSmartRecruitersConnector,
+  createTheMuseConnector,
+  createUsaJobsConnector,
+  createWeWorkRemotelyConnector,
+  createWorkableConnector,
   createJobicyConnector,
 } from "./connectors";
 
 export {
+  createAdzunaConnector,
   createAshbyConnector,
   createBrowserConnector,
   createGreenhouseConnector,
+  createHimalayasConnector,
   createJsonLdConnector,
   createLeverConnector,
+  createPersonioConnector,
+  personioBoardHost,
   createRemoteOkConnector,
+  createRemotiveConnector,
+  createRipplingConnector,
+  createSmartRecruitersConnector,
+  createTheMuseConnector,
+  createUsaJobsConnector,
+  createWeWorkRemotelyConnector,
+  createWorkableConnector,
   createJobicyConnector,
   createHttpCrawlerClient,
   crawlerClientFromEnv,

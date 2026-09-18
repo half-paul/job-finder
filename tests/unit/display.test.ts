@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { salary } from "../../apps/web/lib/display";
+import {
+  count,
+  providerLabel,
+  providerName,
+  salary,
+} from "../../apps/web/lib/display";
 
 describe("salary display", () => {
   it.each(["Unknown", "", "US", "US Dollars", "$", "123"])(
@@ -31,5 +36,27 @@ describe("salary display", () => {
     expect(salary({ salaryMin: 100000, salaryMax: 150000, currency })).toBe(
       "$100K – $150K USD",
     );
+  });
+});
+
+describe("provider display names", () => {
+  it.each([
+    ["TheMuse", "The Muse"],
+    ["WeWorkRemotely", "We Work Remotely"],
+    ["SmartRecruiters", "SmartRecruiters"],
+    ["Greenhouse", "Greenhouse"],
+  ])("renders %s as %s", (provider, expected) => {
+    expect(providerName(provider)).toBe(expected);
+  });
+
+  it("marks only the feeds that need credentials", () => {
+    expect(providerLabel("USAJOBS")).toBe("USAJOBS (needs API key)");
+    expect(providerLabel("Adzuna")).toBe("Adzuna (needs API key)");
+    expect(providerLabel("TheMuse")).toBe("The Muse");
+  });
+
+  it("formats counts with a fixed locale so the server and client agree", () => {
+    expect(count(1234567)).toBe("1,234,567");
+    expect(count(0)).toBe("0");
   });
 });

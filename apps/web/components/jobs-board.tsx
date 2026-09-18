@@ -13,10 +13,11 @@ import {
   ArrowRight,
   Undo2,
 } from "lucide-react";
+import { jobsPageLimit } from "@jobfinder/shared";
 import type { listJobs } from "../lib/jobs";
 import { Button } from "./ui/button";
 import { api } from "./client";
-import { salary } from "../lib/display";
+import { count, salary } from "../lib/display";
 type Result = Awaited<ReturnType<typeof listJobs>>;
 export function JobsBoard({
   initial,
@@ -89,6 +90,12 @@ export function JobsBoard({
     };
   }, [query, work, score, sort, view, page, initial, refresh]);
   const filtered = Boolean(query || work || score !== "0");
+  const noun = data.total === 1 ? "opportunity" : "opportunities";
+  const first = (data.page - 1) * jobsPageLimit + 1;
+  const last = (data.page - 1) * jobsPageLimit + data.items.length;
+  const countLabel = data.items.length
+    ? `Showing ${count(first)}\u2013${count(last)} of ${count(data.total)} ${noun}`
+    : `${count(data.total)} ${noun}`;
   const emptyHeading = filtered
     ? archivedView
       ? "No archived opportunities match these filters"
@@ -167,11 +174,7 @@ export function JobsBoard({
         <SlidersHorizontal size={17} className="filter-icon" />
       </div>
       <div className="results-meta">
-        <span aria-live="polite">
-          {loading
-            ? "Updating…"
-            : `${data.items.length}${data.hasMore ? "+" : ""} opportunities on this page`}
-        </span>
+        <span aria-live="polite">{loading ? "Updating…" : countLabel}</span>
         <label>
           Sort by{" "}
           <select

@@ -11,7 +11,15 @@ import {
   type RobotsRules,
 } from "./robots";
 
-export const discoveryUserAgent = "JobFinderBot/1.0";
+/**
+ * No "bot" token: bot-management edges (Akamai and friends) reset the
+ * connection for user agents matching /bot|crawler|spider|curl/i before
+ * sending a response, so the request hangs to the fetch timeout instead of
+ * failing fast. robots.txt is still fetched and honoured under this name.
+ */
+export const discoveryUserAgent = "JobFinder/1.0";
+/** Product token of `discoveryUserAgent`, matched against robots.txt groups. */
+export const discoveryAgentToken = discoveryUserAgent.split("/")[0];
 const maxRedirects = 3;
 
 /**
@@ -63,7 +71,7 @@ export class RobotsCache {
     const verdict = robotsAllows(
       rules,
       `${url.pathname}${url.search}`,
-      "JobFinderBot",
+      discoveryAgentToken,
     );
     return {
       robotsAllowed: verdict.allowed,

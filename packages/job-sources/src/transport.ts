@@ -99,7 +99,7 @@ export async function fetchText(
   const method = options.method ?? "GET";
   const body = method === "POST" ? (options.body ?? "") : undefined;
   const requestHeaders = {
-    "User-Agent": "JobFinderBot/1.0",
+    "User-Agent": "JobFinder/1.0",
     "Accept-Encoding": "identity",
     ...headers,
   };

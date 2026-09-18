@@ -37,6 +37,28 @@ const matchers: ((url: URL) => AtsDetection | null)[] = [
     return key && key !== "posting-api" ? { ats: "Ashby", key } : null;
   },
   (url) => {
+    if (/^apply\.workable\.com$/i.test(url.hostname)) {
+      const key = firstSegment(url);
+      // apply.workable.com/j/<shortcode> identifies one posting, not the board.
+      return key && key !== "j" ? { ats: "Workable", key } : null;
+    }
+    const match = url.hostname.match(/^([a-z0-9-]+)\.workable\.com$/i);
+    return match && !/^(apply|www)$/i.test(match[1])
+      ? { ats: "Workable", key: match[1] }
+      : null;
+  },
+  (url) => {
+    const match = url.hostname.match(
+      /^([a-z0-9-]+)\.jobs\.personio\.(?:de|com)$/i,
+    );
+    return match ? { ats: "Personio", key: match[1] } : null;
+  },
+  (url) => {
+    if (!/^ats\.rippling\.com$/i.test(url.hostname)) return null;
+    const key = firstSegment(url);
+    return key ? { ats: "Rippling", key } : null;
+  },
+  (url) => {
     const match = url.hostname.match(
       /^([a-z0-9-]+)\.wd\d+\.myworkdayjobs\.com$/i,
     );

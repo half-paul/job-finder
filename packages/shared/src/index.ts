@@ -8,6 +8,12 @@ export * from "./discovery";
 export * from "./crawler";
 export * from "./automation";
 
+/** Upper bound on any stored salary figure, shared by the schema and the feed parsers. */
+export const maxSalary = 10_000_000;
+
+/** Opportunity lists page in fixed blocks; the UI reports a range against the total. */
+export const jobsPageLimit = 50;
+
 const short = z.string().trim().max(200);
 const list = z.array(short.min(1)).max(100);
 export const employmentTypes = [
@@ -281,8 +287,8 @@ export const jobInputSchema = z
     employmentType: z.enum(employmentTypes),
     seniority: z.enum(seniorityLevels),
     workType: z.enum(workTypes),
-    salaryMin: z.number().int().nonnegative().max(10000000).nullable(),
-    salaryMax: z.number().int().nonnegative().max(10000000).nullable(),
+    salaryMin: z.number().int().nonnegative().max(maxSalary).nullable(),
+    salaryMax: z.number().int().nonnegative().max(maxSalary).nullable(),
     salaryPeriod: z
       .enum(["year", "hour", "month", "week", "day", "unknown"])
       .default("year"),
@@ -320,12 +326,32 @@ export const matchSchema = z.object({
   progression: short,
 });
 export type JobMatch = z.infer<typeof matchSchema>;
+/**
+ * Feeds that span employers. They carry no board name, one row serves the whole
+ * feed, and a scan of one can never prove an employer's full inventory.
+ */
+export const globalSourceProviders = [
+  "RemoteOK",
+  "Jobicy",
+  "Remotive",
+  "TheMuse",
+  "Himalayas",
+  "WeWorkRemotely",
+  "USAJOBS",
+  "Adzuna",
+] as const;
+export const isGlobalSource = (provider: string) =>
+  globalSourceProviders.some((value) => value === provider);
+
 const provider = z.enum([
   "Greenhouse",
   "Lever",
   "Ashby",
-  "RemoteOK",
-  "Jobicy",
+  "Workable",
+  "Personio",
+  "SmartRecruiters",
+  "Rippling",
+  ...globalSourceProviders,
   "JSON-LD",
 ]);
 export const sourceInputSchema = z
@@ -342,12 +368,8 @@ export const sourceInputSchema = z
   .refine(
     (v) =>
       v.provider === "JSON-LD" ||
-      v.provider === "RemoteOK" ||
-      v.provider === "Jobicy" ||
+      isGlobalSource(v.provider) ||
       v.board.length > 0,
     "Board/site name is required",
   );
 export type SourceInput = z.infer<typeof sourceInputSchema>;
-export const globalSourceProviders = ["RemoteOK", "Jobicy"] as const;
-export const isGlobalSource = (provider: string) =>
-  globalSourceProviders.some((value) => value === provider);
