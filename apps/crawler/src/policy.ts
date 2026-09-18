@@ -1,4 +1,7 @@
+import { isIP } from "node:net";
+import { lookup } from "node:dns/promises";
 import { registrableDomain, atsHostPattern } from "@jobfinder/discovery";
+import { isPublicAddress } from "@jobfinder/job-sources";
 
 /**
  * A crawl may follow links within the company's own registrable domain and on
@@ -48,4 +51,43 @@ export function looksLikeCaptcha(html: string): boolean {
  */
 export function crawlerUserAgent(chromeUserAgent: string): string {
   return `${chromeUserAgent.replace(/HeadlessChrome/g, "Chrome")} JobFinder/1.0`;
+}
+
+/**
+ * Reuses the worker's own public-address predicate (`@jobfinder/job-sources`,
+ * shared with `packages/discovery`'s connector transport) rather than
+ * re-deriving the range list, so the two paths cannot disagree on what
+ * "public" means. It already rejects: IPv4 loopback, private (10/8,
+ * 172.16/12, 192.168/16), CGNAT (100.64/10), link-local (169.254/16),
+ * broadcast/multicast/reserved (>=224), and unspecified (0.0.0.0); and,
+ * for IPv6, everything outside the 2000::/3 global-unicast range —
+ * which is a strict allowlist, so loopback (::1), unspecified (::),
+ * unique-local (fc00::/7), link-local (fe80::/10), and any IPv4-mapped
+ * form (`::ffff:a.b.c.d`, which never starts with `2` or `3`) are all
+ * rejected as a consequence, not as special cases.
+ */
+export function publicAddressAllowed(address: string): boolean {
+  return isPublicAddress(address);
+}
+
+/**
+ * Resolves a hostname (or passes through an already-literal IP) and checks
+ * every returned address against `publicAddressAllowed`. A single private
+ * address among several is enough to refuse: an attacker only needs one
+ * resolver response to point at an internal service. A hostname that fails
+ * to resolve at all is treated as not-public — there is nothing to allow.
+ */
+export async function resolvesToPublicAddress(
+  hostname: string,
+): Promise<boolean> {
+  if (isIP(hostname)) return publicAddressAllowed(hostname);
+  try {
+    const records = await lookup(hostname, { all: true });
+    return (
+      records.length > 0 &&
+      records.every((record) => publicAddressAllowed(record.address))
+    );
+  } catch {
+    return false;
+  }
 }

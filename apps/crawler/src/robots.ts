@@ -6,6 +6,40 @@ import {
 } from "@jobfinder/discovery";
 import { CrawlerFailure } from "./failure";
 
+/** Matches Task 1's cap on the same fetch (`packages/discovery/src/transport.ts`). */
+const maxRobotsBytes = 512 * 1024;
+
+/**
+ * Reads the body with a hard cap instead of `response.text()`, which has
+ * none. An over-size robots.txt is refused rather than silently truncated —
+ * a truncated ruleset could read as more permissive than the real one.
+ */
+async function readCapped(
+  response: Response,
+  hostname: string,
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return response.text();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > maxRobotsBytes)
+        throw new CrawlerFailure(
+          `robots.txt for ${hostname} exceeds ${maxRobotsBytes} bytes`,
+          "blocked",
+        );
+      chunks.push(part.value);
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 /**
  * The crawler cannot reuse `RobotsCache`: that class is bound to the worker's
  * pinned-DNS transport. The rules and the verdict are the same, and come from
@@ -67,7 +101,7 @@ export async function fetchRobots(
       `Cannot verify robots.txt for ${origin.hostname}: unexpected content type ${contentType}`,
       "blocked",
     );
-  const rules = parseRobots(await response.text());
+  const rules = parseRobots(await readCapped(response, origin.hostname));
   return {
     allows: (path) => robotsAllows(rules, path, discoveryAgentToken).allowed,
   };

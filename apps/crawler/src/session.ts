@@ -4,12 +4,15 @@ import {
   crawlerUserAgent,
   hostAllowed,
   looksLikeCaptcha,
+  resolvesToPublicAddress,
 } from "./policy";
 import { CrawlerFailure } from "./failure";
 import { fetchRobots } from "./robots";
 
 const sessionBudgetMs = 60_000;
 const minGapMs = 2_000;
+/** Consistent with the connector transport's default (`packages/job-sources`). */
+const maxHtmlBytes = 8 * 1024 * 1024;
 
 export interface Session {
   /** Navigates and returns settled HTML, or throws a `CrawlerFailure`. */
@@ -65,11 +68,34 @@ export async function withSession<T>(
       javaScriptEnabled: true,
       acceptDownloads: false,
       httpCredentials: undefined,
+      // Chromium does not run `context.route` over service-worker-initiated
+      // requests, so a page's own SW could otherwise bypass the host
+      // allowlist, the blocked resource types, and the private-address
+      // check below entirely. Blocking SW registration closes that hole.
+      serviceWorkers: "block",
       // Test-only: the e2e fixture origin uses a self-signed certificate. Never
       // set this in Compose or CI's deployed environment.
       ignoreHTTPSErrors: process.env.CRAWLER_INSECURE_TLS === "1",
     });
     let lastLoad = 0;
+    // One DNS lookup per hostname for the life of this session, not one per
+    // request: every subresource on a page shares its document's host, and
+    // pagination re-visits the same host repeatedly.
+    const addressCache = new Map<string, Promise<boolean>>();
+    const isHostPublic = (hostname: string): Promise<boolean> => {
+      let pending = addressCache.get(hostname);
+      if (!pending) {
+        pending = resolvesToPublicAddress(hostname);
+        addressCache.set(hostname, pending);
+      }
+      return pending;
+    };
+    // Set by the route handler just before it aborts the top-level
+    // navigation request for resolving to a non-public address, so
+    // `open()`'s `page.goto()` catch below can re-throw a specific,
+    // plain-language `CrawlerFailure` instead of a generic navigation
+    // error. Reset at the top of every `open()` call.
+    let privateAddressBlock: CrawlerFailure | null = null;
     await context.route("**/*", async (route) => {
       const request = route.request();
       let target: URL;
@@ -80,6 +106,17 @@ export async function withSession<T>(
       }
       if (blockedResource(request.resourceType())) return route.abort();
       if (!hostAllowed(target, origin)) return route.abort();
+      // Checked on every intercepted request — not only the first
+      // navigation — so a redirect or a subresource load cannot reach an
+      // internal address that the initial hostname check never saw.
+      if (!(await isHostPublic(target.hostname))) {
+        if (request.isNavigationRequest())
+          privateAddressBlock = new CrawlerFailure(
+            `Refusing ${target.hostname}: resolves to a non-public address`,
+            "blocked",
+          );
+        return route.abort();
+      }
       return route.continue();
     });
     const page = await context.newPage();
@@ -103,6 +140,10 @@ export async function withSession<T>(
             `robots.txt disallows ${url.href}`,
             "blocked",
           );
+        // Reset before this navigation: the route handler only sets this
+        // when it aborts a navigation request for a private address, and it
+        // must not leak a stale value from a previous `open()` call.
+        privateAddressBlock = null;
         const wait = minGapMs - (Date.now() - lastLoad);
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
         lastLoad = Date.now();
@@ -112,6 +153,11 @@ export async function withSession<T>(
             timeout: Math.max(1, Math.min(20_000, deadline - Date.now())),
           })
           .catch((error: Error) => {
+            // A route abort for a non-public address is the real cause of
+            // this rejection; report that specifically instead of the
+            // generic navigation failure Playwright raises for an aborted
+            // request.
+            if (privateAddressBlock) throw privateAddressBlock;
             // Playwright's own timeout (this one page loaded slowly) is
             // identifiable by name; anything else is a genuine navigation
             // failure (DNS, connection reset, etc). This is deliberately
@@ -131,6 +177,13 @@ export async function withSession<T>(
           .waitForLoadState("networkidle", { timeout: 5_000 })
           .catch(() => {});
         const html = await page.content();
+        // A refusal, not a silent truncation: the caller needs to know this
+        // page was skipped for its size, not receive a chopped-off posting.
+        if (Buffer.byteLength(html, "utf8") > maxHtmlBytes)
+          throw new CrawlerFailure(
+            `Page content for ${url.href} exceeds ${maxHtmlBytes} bytes`,
+            "blocked",
+          );
         if (looksLikeCaptcha(html))
           throw new CrawlerFailure(
             "The site presented a challenge page; automated access is declined",
