@@ -41,7 +41,17 @@ export class RobotsCache {
             { Accept: "text/plain" },
             { ...this.options, maxBytes: 512 * 1024 },
           );
-          if (response.ok) return parseRobots(text);
+          if (response.ok) {
+            // A robots.txt that redirects to a storefront homepage arrives here as
+            // HTML. Parsing it yields an empty ruleset, which reads as allow-all —
+            // the opposite of the safe answer for a policy we could not verify.
+            const contentType = response.headers.get("content-type") ?? "";
+            if (contentType && !/^\s*text\/plain\b/i.test(contentType))
+              throw new Error(
+                `Cannot verify robots.txt for ${host}: unexpected content type ${contentType}.`,
+              );
+            return parseRobots(text);
+          }
           if ([404, 410].includes(response.status)) return parseRobots("");
           const location = response.headers.get("location");
           if (

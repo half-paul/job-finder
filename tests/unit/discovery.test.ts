@@ -330,6 +330,32 @@ describe("Phase 5 discovery transport", () => {
       }),
     ).rejects.toBeInstanceOf(RobotsBlockedError);
   });
+
+  it("refuses to treat an HTML robots.txt as an empty ruleset", async () => {
+    const fetchImpl = routeFetch({
+      "https://html-robots.example/robots.txt": () =>
+        new Response("<html><body>Shop now</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        }),
+    });
+    const robots = new RobotsCache({ fetchImpl, resolveHost: publicHost });
+    await expect(
+      robots.check(new URL("https://html-robots.example/careers")),
+    ).rejects.toThrow(/unexpected content type/i);
+  });
+
+  it("still accepts a robots.txt served without a content type", async () => {
+    const fetchImpl = routeFetch({
+      "https://bare-robots.example/robots.txt": () =>
+        new Response("User-agent: *\nDisallow: /private\n", { status: 200 }),
+    });
+    const robots = new RobotsCache({ fetchImpl, resolveHost: publicHost });
+    const check = await robots.check(
+      new URL("https://bare-robots.example/careers"),
+    );
+    expect(check.robotsAllowed).toBe(true);
+  });
 });
 
 import {
