@@ -474,9 +474,16 @@ export async function withSession<T>(
       // allowlist, the blocked resource types, and the private-address
       // check below entirely. Blocking SW registration closes that hole.
       serviceWorkers: "block",
-      // Test-only: the e2e fixture origin uses a self-signed certificate. Never
-      // set this in Compose or CI's deployed environment.
-      ignoreHTTPSErrors: process.env.CRAWLER_INSECURE_TLS === "1",
+      // Test-only: the e2e fixture origin uses a self-signed certificate.
+      // Never set CRAWLER_INSECURE_TLS in Compose's production `crawler`
+      // service or in CI's deployed environment. `NODE_ENV === "production"`
+      // is checked first and wins outright, for the same reason and in the
+      // same way as `insecureTestHostnameAllowed` in `policy.ts`: the env
+      // var alone is only undiscovered, not unreachable, because the
+      // service also keeps `env_file: .env.local`.
+      ignoreHTTPSErrors:
+        process.env.NODE_ENV !== "production" &&
+        process.env.CRAWLER_INSECURE_TLS === "1",
     });
     // One DNS lookup per hostname for the life of this session, not one per
     // request: every subresource on a page shares its document's host, and

@@ -105,6 +105,24 @@ test.describe("crawler service", () => {
 
   test.afterAll(() => server.close());
 
+  // M2 fix round: a stray process squatting on CRAWLER_URL's port answered
+  // every request in this suite during earlier development, with none of
+  // the crawler's own logs to show for it, and every test below still
+  // "passed" against a service that was not the crawler at all. This check
+  // runs first and unauthenticated, so a wrong CRAWLER_URL fails loudly and
+  // immediately with a named cause, instead of quietly producing a false
+  // green for the tests that follow.
+  test("CRAWLER_URL answers as the crawler, not some other service", async ({
+    request,
+  }) => {
+    const response = await request.get(`${crawlerUrl}/health`);
+    expect(response.ok(), await response.text()).toBe(true);
+    expect(await response.json()).toMatchObject({
+      service: "jobfinder-crawler",
+      status: "ok",
+    });
+  });
+
   test("rejects an unauthenticated request", async ({ request }) => {
     const response = await request.post(`${crawlerUrl}/crawl`, {
       headers: { "content-type": "application/json" },

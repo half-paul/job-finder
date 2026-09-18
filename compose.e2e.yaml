@@ -13,11 +13,17 @@
 # - CRAWLER_INSECURE_TEST_HOSTNAME is the test-only SSRF allowlist gate
 #   (apps/crawler/src/policy.ts, `insecureTestHostnameAllowed`): it permits
 #   exactly the one literal hostname named here — nothing else, no ranges —
-#   to resolve to a private address. It is read by the crawler's own code,
-#   is not documented in .env.example, and is never set in compose.yaml, so
-#   there is no ordinary configuration path (an operator's own .env.local
-#   would still need to know this exact, undocumented variable name and
-#   would still only unlock the one named hostname) that turns it on.
+#   to resolve to a private address. It is not documented in .env.example
+#   and is never set in compose.yaml.
+# - NODE_ENV overrides compose.yaml's `NODE_ENV: production` for this
+#   service only. That value is the *real* barrier against the three
+#   insecure vars above: apps/crawler/src/policy.ts and session.ts refuse
+#   all of them outright whenever NODE_ENV is "production", specifically
+#   because compose.yaml's crawler service still keeps `env_file:
+#   .env.local` — an operator's own file, undocumented variable or not —
+#   so the env vars alone were only undiscovered, not unreachable. This
+#   overlay has to un-set that backstop to let its own fixture-only values
+#   take effect; nothing else may do so.
 # - extra_hosts makes host.docker.internal resolvable from inside the
 #   container on Linux (the `host-gateway` special value), not only on
 #   Docker Desktop; the e2e fixture server binds to the CI runner/host itself.
@@ -26,6 +32,7 @@
 services:
   crawler:
     environment:
+      NODE_ENV: test
       CRAWLER_INSECURE_TLS: "1"
       NODE_TLS_REJECT_UNAUTHORIZED: "0"
       CRAWLER_INSECURE_TEST_HOSTNAME: host.docker.internal

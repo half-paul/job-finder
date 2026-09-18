@@ -104,22 +104,27 @@ export async function resolvesToPublicAddress(
  *
  * It cannot be switched on by ordinary configuration:
  * - `CRAWLER_INSECURE_TEST_HOSTNAME` is unset by default, so this returns
- *   `false` for every hostname in production and in ordinary local
- *   development, with no code change required to keep it off.
- * - It is not documented in `.env.example` and is never set in
- *   `compose.yaml`'s `crawler` service (the one that runs anywhere real
- *   traffic reaches). Only `compose.e2e.yaml` — an overlay applied
- *   explicitly and only for a local or CI e2e run, never on its own — sets
- *   it, to the one hostname the e2e fixture uses.
- * - Even fully set, it allows one exact hostname string, so it cannot be
- *   repurposed into a general SSRF bypass by pointing a different hostname
- *   at a private address.
+ *   `false` for every hostname with no code change required to keep it off,
+ *   and it is not documented in `.env.example` or set in `compose.yaml`.
+ * - `NODE_ENV === "production"` refuses it outright, checked first and
+ *   before the env var is even read. This is the real barrier, not the
+ *   line above: `compose.yaml`'s `crawler` service also keeps
+ *   `env_file: .env.local` (the one file the README tells every operator to
+ *   create), so the env var alone is undiscovered rather than unreachable —
+ *   an operator's own `.env.local` could still set it. `compose.yaml` sets
+ *   `NODE_ENV: production` in the service's own `environment:` block, which
+ *   Compose gives precedence over `env_file`, so `.env.local` cannot
+ *   override it back for this one service. `compose.e2e.yaml` overrides
+ *   `NODE_ENV` again (to a non-production value) for the e2e run only.
+ * - Even fully set and even outside production, it allows one exact
+ *   hostname string, so it cannot be repurposed into a general SSRF bypass
+ *   by pointing a different hostname at a private address.
  *
- * Follows the same gate pattern as `CRAWLER_INSECURE_TLS` in `session.ts`:
- * an environment flag read directly, off by default, and named so a reader
- * cannot mistake it for anything but a test affordance.
+ * Follows the same gate pattern as `CRAWLER_INSECURE_TLS` in `session.ts`,
+ * which gets the identical `NODE_ENV` guard for the same reason.
  */
 function insecureTestHostnameAllowed(hostname: string): boolean {
+  if (process.env.NODE_ENV === "production") return false;
   const allowed = process.env.CRAWLER_INSECURE_TEST_HOSTNAME?.trim();
   return Boolean(allowed) && hostname === allowed;
 }

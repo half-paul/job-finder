@@ -14,6 +14,24 @@ const port = Number(process.env.PORT ?? 4000);
 const secret = process.env.CRAWLER_SECRET?.trim();
 if (!secret) throw new Error("CRAWLER_SECRET is required. See README.md.");
 
+/** What `/health` reports itself as — see the route below. */
+const serviceIdentity = "jobfinder-crawler";
+
+// M1 fix-round hardening, belt and braces alongside the direct NODE_ENV
+// checks in policy.ts (`insecureTestHostnameAllowed`) and session.ts (the
+// `ignoreHTTPSErrors` gate): `NODE_TLS_REJECT_UNAUTHORIZED` is read by
+// Node's own TLS internals on every connection, not by any call site of
+// ours, so there is nothing in our code to gate against it directly. The
+// only way to refuse it in production is to remove it from the environment
+// before the first network call — which happens well after this module
+// finishes loading, so doing it here, once, at the top is early enough.
+// `compose.yaml`'s crawler service sets `NODE_ENV: production` in its own
+// `environment:` block, which Compose gives precedence over `env_file`, so
+// a developer's `.env.local` cannot flip it back for this one service.
+if (process.env.NODE_ENV === "production") {
+  delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+}
+
 function log(
   level: "info" | "warn" | "error",
   event: string,
@@ -156,6 +174,15 @@ const server = createServer(async (req, res) => {
   };
 
   try {
+    // Unauthenticated and un-abbreviated on purpose: this is Compose's own
+    // healthcheck probe (no way to hand it a bearer secret) and, per
+    // tests/e2e/crawler.spec.ts, the identity check a test suite runs before
+    // trusting `CRAWLER_URL` at all — a stray process squatting on the same
+    // port answered every request during this feature's own development and
+    // produced a false green. The body says only who is answering and that
+    // it is up; nothing about configuration, secrets or request handling.
+    if (req.method === "GET" && req.url === "/health")
+      return send(200, { service: serviceIdentity, status: "ok" });
     if (req.method !== "POST") return fail(405, "Use POST", "internal");
     if (!authorised(req.headers.authorization))
       return fail(401, "Bearer token required", "internal");

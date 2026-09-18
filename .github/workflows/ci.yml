@@ -47,7 +47,12 @@ jobs:
       # the only compose service started in CI; postgres is the job's own
       # `services:` container above, and web/worker run directly via
       # Playwright's `webServer` (playwright.config.ts).
-      - run: docker compose -f compose.yaml -f compose.e2e.yaml up -d --build crawler
+      # `--wait` blocks here until the crawler's healthcheck (its own
+      # unauthenticated `/health` endpoint) reports healthy, so this step —
+      # not luck in how long the subsequent Next.js build/start happens to
+      # take — is what guarantees the crawler is actually up before
+      # tests/e2e/crawler.spec.ts runs against it.
+      - run: docker compose -f compose.yaml -f compose.e2e.yaml up -d --wait --build crawler
       - run: npm run test:e2e
       - run: docker compose -f compose.yaml -f compose.e2e.yaml down -v
         if: always()

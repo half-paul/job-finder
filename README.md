@@ -140,12 +140,12 @@ For integration/E2E tests, start PostgreSQL, migrate and build first. Playwright
 
 ```sh
 docker compose build crawler worker web
-docker compose -f compose.yaml -f compose.e2e.yaml up -d --build crawler
+docker compose -f compose.yaml -f compose.e2e.yaml up -d --wait --build crawler
 docker compose up -d
 npx playwright test tests/e2e/crawler.spec.ts tests/e2e/companies.spec.ts
 ```
 
-`compose.e2e.yaml` is never used outside a test run: it is what publishes the crawler's port, relaxes TLS verification for both Chromium (`CRAWLER_INSECURE_TLS`) and Node's own `fetch` (`NODE_TLS_REJECT_UNAUTHORIZED`), and allowlists the one test hostname (`CRAWLER_INSECURE_TEST_HOSTNAME`) the fixture uses. None of those three variables appear in `compose.yaml` or `.env.example`.
+`compose.e2e.yaml` is never used outside a test run: it is what publishes the crawler's port, relaxes TLS verification for both Chromium (`CRAWLER_INSECURE_TLS`) and Node's own `fetch` (`NODE_TLS_REJECT_UNAUTHORIZED`), allowlists the one test hostname (`CRAWLER_INSECURE_TEST_HOSTNAME`) the fixture uses, and overrides `NODE_ENV` off `production` so those three variables can take effect at all — `compose.yaml`'s own `NODE_ENV: production` makes `apps/crawler` refuse all three outright regardless of the variables themselves, since that service still loads `.env.local`. `--wait` blocks until the crawler's unauthenticated `/health` endpoint reports healthy (the same endpoint `tests/e2e/crawler.spec.ts` checks first, to fail loudly rather than pass quietly against the wrong process on `CRAWLER_URL`).
 
 Unit tests cover password verification, exact origin checks, bounded bodies, canonical URLs, weight validation, keyword import gates, qualification/interest scoring, hard filters, strict AI schemas, OpenAI response validation and cost estimation, UTC schedule alignment, recommendation bands, watchlist keys, alert dedupe identity and preference defaults, and real TXT/PDF/DOCX parsing including malformed/oversized/compressed input. API/database tests verify hashed credentials/sessions, revocation, rate limits, foreign keys, pgvector, hard-filter precedence, archiving scope, source ownership, watchlist scoping, worker scan idempotency, alert and digest idempotency, source schedules and expired-row cleanup. Browser tests verify profile/preferences, resume ownership, private jobs, saved-state/history, archive and restore counts, filtering, mobile overflow, theme and sign-in/out.
 

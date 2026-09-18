@@ -101,12 +101,33 @@ services:
     environment:
       PORT: "4000"
       CRAWLER_SECRET: local-development-only
+      # Load-bearing, not cosmetic: apps/crawler/src/policy.ts and session.ts
+      # refuse their test-only insecure-SSRF/TLS escape hatches outright
+      # whenever NODE_ENV is "production", regardless of what CRAWLER_INSECURE_*
+      # env vars this service's own `env_file: .env.local` line might supply.
+      # Compose gives an explicit `environment:` entry precedence over
+      # `env_file`, so a developer's own .env.local cannot override this back.
+      NODE_ENV: production
     # Deliberately no DATABASE_URL and no published port: the crawler runs
     # untrusted pages and must not be able to reach PostgreSQL or the host.
     # host.docker.internal is resolvable on Docker Desktop but not on Linux CI;
     # tests/e2e/crawler.spec.ts serves its fixture origin there. compose.e2e.yaml
     # (never applied here) adds the extra_hosts entry and test-only overrides
     # that e2e run needs; this production-shaped definition stays clean.
+    healthcheck:
+      # Unauthenticated on purpose (see /health in apps/crawler/src/index.ts):
+      # a probe that needed the bearer secret would be useless to Compose,
+      # and this endpoint exposes nothing beyond liveness and identity.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:4000/health').then(r=>r.json()).then(d=>process.exit(d.service==='jobfinder-crawler'?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
     networks:
       - crawler-net
