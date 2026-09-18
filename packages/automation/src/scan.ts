@@ -9,6 +9,7 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   getPool,
   companyCandidates,
+  crawlPatterns,
   jobReferences,
   jobSources,
   jobs,
@@ -22,10 +23,12 @@ import {
   isGlobalSource,
   keywordFilter,
   preferencesSchema,
+  type CrawlPatternSpec,
 } from "@jobfinder/shared";
 import { canonicalUrl, digest } from "@jobfinder/shared/hash";
 import {
   createConnector,
+  crawlerClientFromEnv,
   providerName,
   type ConnectorOptions,
   type JobReference,
@@ -126,6 +129,28 @@ const scanIntervalReason: Record<string, string> = {
   Remotive: "This feed refreshes at most once every six hours.",
 };
 
+export type CrawlPatternRow = typeof crawlPatterns.$inferSelect;
+
+/**
+ * The stored row is wider than the wire contract and its `method` is a plain
+ * text column, so a row written by an older migration cannot be trusted to
+ * hold a replayable verb.
+ */
+export function crawlPatternToSpec(
+  row: CrawlPatternRow | undefined,
+): CrawlPatternSpec | null {
+  if (!row) return null;
+  if (row.method !== "GET" && row.method !== "POST") return null;
+  return {
+    urlTemplate: row.urlTemplate,
+    method: row.method,
+    headers: row.headers,
+    body: row.body,
+    jobsPath: row.jobsPath,
+    fieldMap: row.fieldMap,
+  };
+}
+
 export async function scanSourceWithDb(
   options: ScanSourceOptions,
   db: AutomationDb,
@@ -211,6 +236,9 @@ export async function scanSourceWithDb(
     "scan-start",
     `Starting ${trigger.toLowerCase()} scan using ${source.provider}.`,
   );
+  // Hoisted so the catch block can record a failure against the same pattern
+  // the try block loaded, without threading it through every intermediate call.
+  let patternRow: CrawlPatternRow | undefined;
   try {
     const provider = providerName(source.provider);
     if (provider === "Careers") {
@@ -237,6 +265,18 @@ export async function scanSourceWithDb(
           "Company discovery must approve this careers source before scanning.",
         );
     }
+    if (provider === "CapturedApi") {
+      [patternRow] = await db
+        .select()
+        .from(crawlPatterns)
+        .where(eq(crawlPatterns.sourceId, sourceId));
+    }
+    const crawlPattern = crawlPatternToSpec(patternRow);
+    if (provider === "CapturedApi" && !crawlPattern)
+      throw new AppError(
+        409,
+        "This source has no saved API pattern. Retry discovery to rebuild it.",
+      );
     const connector =
       provider === "Careers"
         ? createAdaptiveCareersConnector({
@@ -252,6 +292,9 @@ export async function scanSourceWithDb(
           })
         : createConnector(provider, {
             ...options.connectorOptions,
+            crawlPattern,
+            crawlerClient:
+              options.connectorOptions?.crawlerClient ?? crawlerClientFromEnv(),
             jsonLdAllowedHosts:
               options.connectorOptions?.jsonLdAllowedHosts ??
               (process.env.JSON_LD_ALLOWED_HOSTS ?? "")
@@ -388,6 +431,11 @@ export async function scanSourceWithDb(
           lastModified: page.next?.lastModified ?? null,
         })
         .where(eq(jobSources.id, source.id));
+      if (patternRow)
+        await db
+          .update(crawlPatterns)
+          .set({ lastVerifiedAt: new Date(), failures: 0 })
+          .where(eq(crawlPatterns.id, patternRow.id));
       return await finishRun(db, run.id, {
         status: "Succeeded",
         startedAt,
@@ -427,6 +475,11 @@ export async function scanSourceWithDb(
         error: error instanceof Error ? error.message : "Source scan failed",
       })
       .where(eq(searchRuns.id, run.id));
+    if (patternRow)
+      await db
+        .update(crawlPatterns)
+        .set({ failures: sql`${crawlPatterns.failures} + 1` })
+        .where(eq(crawlPatterns.id, patternRow.id));
     await recordActivity(db, {
       userId,
       sourceId,
