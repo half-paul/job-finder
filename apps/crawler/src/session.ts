@@ -22,10 +22,26 @@ const sessionBudgetMs = 60_000;
 const defaultMinGapMs = 2_000;
 /** Consistent with the connector transport's default (`packages/job-sources`). */
 const maxHtmlBytes = 8 * 1024 * 1024;
+/** A captured API response is a few pages of JSON, not a data export. */
+const maxJsonBytes = 4 * 1024 * 1024;
+
+/** The slice of a Playwright `Request` that a captured pattern can replay. */
+export interface CapturedJsonRequest {
+  url: string;
+  method: "GET" | "POST";
+  headers: Record<string, string>;
+  body: string | null;
+}
 
 export interface Session {
   /** Navigates and returns settled HTML, or throws a `CrawlerFailure`. */
   open(url: URL): Promise<string>;
+  /** Called for every same-origin JSON response the page receives. */
+  onJsonResponse(
+    handler: (request: CapturedJsonRequest, body: unknown) => Promise<void>,
+  ): void;
+  /** Resolves once the network has been idle, capped at 20 s. */
+  settle(): Promise<void>;
 }
 
 /** Turns a hop refusal into the failure the API caller sees. */
@@ -145,6 +161,64 @@ export function createSession(deps: SessionDeps): Session {
   const { page, origin, rules, isPublic, latch, routeAbort, deadline } = deps;
   const gap = deps.minGapMs ?? defaultMinGapMs;
   let lastLoad = 0;
+  const jsonHandlers: Array<
+    (request: CapturedJsonRequest, body: unknown) => Promise<void>
+  > = [];
+  // Registered once, unconditionally: `context.route` (in `withSession`)
+  // already refused any request off-host or resolving to a private address
+  // before it could ever produce a response here, so this listener only
+  // needs to apply the capture-specific filters — it is not a second copy of
+  // the security boundary, just downstream of it. A crawl that never calls
+  // `onJsonResponse` pays for an empty array iteration per response, which is
+  // noise, not cost.
+  page.on("response", (response) => {
+    void (async () => {
+      if (jsonHandlers.length === 0) return;
+      const request = response.request();
+      const method = request.method();
+      // `capturedRequestSchema` only has room for the two verbs a JSON API
+      // realistically uses to list postings; anything else (HEAD, PUT,
+      // DELETE, ...) is skipped rather than coerced into a shape that would
+      // misrepresent what the page actually did.
+      if (method !== "GET" && method !== "POST") return;
+      let target: URL;
+      try {
+        target = new URL(response.url());
+      } catch {
+        return;
+      }
+      if (!hostAllowed(target, origin)) return;
+      if (response.status() !== 200) return;
+      const contentType = response.headers()["content-type"] ?? "";
+      if (!contentType.toLowerCase().includes("json")) return;
+      let raw: Buffer;
+      try {
+        // A response can fail to materialise a body at all — the page
+        // navigated away, the connection dropped mid-read — and that is a
+        // missed capture opportunity, not a session failure.
+        raw = await response.body();
+      } catch {
+        return;
+      }
+      if (raw.byteLength >= maxJsonBytes) return;
+      let body: unknown;
+      try {
+        body = JSON.parse(raw.toString("utf8"));
+      } catch {
+        // Malformed JSON (or a JSON content-type on a non-JSON body, which
+        // happens) is skipped, not fatal — one bad response must not abort
+        // capture for the whole page.
+        return;
+      }
+      const captured: CapturedJsonRequest = {
+        url: request.url(),
+        method,
+        headers: request.headers(),
+        body: method === "POST" ? request.postData() : null,
+      };
+      for (const handler of jsonHandlers) await handler(captured, body);
+    })();
+  });
   return {
     async open(url) {
       if (Date.now() > deadline)
@@ -246,6 +320,20 @@ export function createSession(deps: SessionDeps): Session {
           "captcha",
         );
       return html;
+    },
+    onJsonResponse(handler) {
+      jsonHandlers.push(handler);
+    },
+    async settle() {
+      // Capture has no navigation of its own to wait on — the page's own
+      // script fires the API call — so this is the only signal available
+      // that it has probably finished. The rejection is swallowed for the
+      // same reason `open()`'s networkidle wait is: a page that never goes
+      // idle (a polling widget, an open WebSocket) must not fail capture,
+      // it just means the wait runs the full 20s.
+      await page
+        .waitForLoadState("networkidle", { timeout: 20_000 })
+        .catch(() => {});
     },
   };
 }

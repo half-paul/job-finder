@@ -54,6 +54,33 @@ const routes: Record<string, { body: string; type?: string }> = {
   "/challenge": {
     body: '<html><body><div class="g-recaptcha"></div></body></html>',
   },
+  // A page whose listings come from its own JSON API rather than server-
+  // rendered HTML — the shape `/capture` exists to observe. The cookie is
+  // set client-side so the browser attaches it to the fetch itself (a
+  // script cannot set a `Cookie:` header directly); the `Authorization`
+  // header is set explicitly. Both must be gone from the saved pattern.
+  "/capture-source": {
+    body: `<html><body><script>
+      document.cookie = "session=super-secret";
+      fetch("/api/jobs", {
+        headers: {
+          "Authorization": "Bearer super-secret-token",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      });
+    </script></body></html>`,
+  },
+  "/api/jobs": {
+    body: JSON.stringify({
+      data: {
+        results: [
+          { title: "Staff Engineer", url: "/careers/job/staff-engineer-1234" },
+          { title: "Designer", url: "/careers/job/designer-5678" },
+        ],
+      },
+    }),
+    type: "application/json",
+  },
 };
 
 test.describe("crawler service", () => {
@@ -122,5 +149,27 @@ test.describe("crawler service", () => {
     });
     expect(response.status()).toBe(422);
     expect(await response.json()).toMatchObject({ kind: "captcha" });
+  });
+
+  test("captures the JSON API a page calls, with headers reduced to the allowlist", async ({
+    request,
+  }) => {
+    const response = await request.post(`${crawlerUrl}/capture`, {
+      headers: auth,
+      data: { url: `${origin}/capture-source` },
+    });
+    expect(response.ok()).toBe(true);
+    const body = await response.json();
+    expect(body.patterns).toHaveLength(1);
+    const [pattern] = body.patterns;
+    expect(pattern.url).toContain("/api/jobs");
+    expect(pattern.method).toBe("GET");
+    expect(pattern.jobsPath).toBe("/data/results");
+    expect(pattern.sample).toHaveLength(2);
+    // The whole point of the allowlist: neither the cookie the page set nor
+    // the authorization header it sent survives into the saved pattern.
+    expect(Object.keys(pattern.headers)).not.toContain("cookie");
+    expect(Object.keys(pattern.headers)).not.toContain("authorization");
+    expect(pattern.headers["x-requested-with"]).toBe("XMLHttpRequest");
   });
 });

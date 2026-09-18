@@ -5,6 +5,7 @@ import {
   nextPageLink,
   postingLinks,
 } from "../../apps/crawler/src/extract";
+import { postingArrayPointer } from "../../apps/crawler/src/capture";
 
 const fixture = (name: string) =>
   readFileSync(new URL(`../fixtures/crawler/${name}`, import.meta.url), "utf8");
@@ -107,5 +108,38 @@ describe("crawler extraction", () => {
     expect(posting?.description).toContain("Paragraph one");
     expect(posting?.description).toContain("Paragraph two");
     expect(posting?.description).toContain("Paragraph three");
+  });
+});
+
+describe("posting array detection", () => {
+  it("points at a nested array of postings", () => {
+    expect(
+      postingArrayPointer({
+        data: {
+          results: [
+            { title: "A", url: "/a" },
+            { title: "B", url: "/b" },
+          ],
+        },
+      }),
+    ).toBe("/data/results");
+  });
+
+  it("accepts a top-level array", () => {
+    expect(
+      postingArrayPointer([
+        { name: "A", absolute_url: "https://x.example/a" },
+        { name: "B", absolute_url: "https://x.example/b" },
+      ]),
+    ).toBe("");
+  });
+
+  it("rejects an array of one, and arrays without a title and a URL", () => {
+    expect(
+      postingArrayPointer({ results: [{ title: "A", url: "/a" }] }),
+    ).toBeNull();
+    expect(
+      postingArrayPointer({ results: [{ colour: "red" }, { colour: "blue" }] }),
+    ).toBeNull();
   });
 });
