@@ -7,13 +7,14 @@ JobFinder AI is a private career workspace: discover permitted job feeds, filter
 - `apps/web` (`@jobfinder/web`): Next.js App Router UI, authenticated route handlers in `app/api/[...path]/route.ts`, server-only services in `lib/`, presentational components in `components/`. Workspace pages live under `app/(workspace)/`.
 - `apps/worker` (`@jobfinder/worker`): the pg-boss process. Owns scheduled scans, scheduled evaluation, alert writes, the daily digest and hourly cleanup; publishes no ports. Handlers live in `src/handlers.ts`, queue names and job payload schemas in `src/queues.ts`.
 - `packages/automation` (`@jobfinder/automation`): the Next.js-free service layer shared by web and worker — the source scan engine, the bounded evaluation batch, watchlists, alerts, the digest, schedule arithmetic, cleanup and diagnostics. `apps/web/lib/discovery.ts` and `apps/web/lib/matching.ts` are thin `server-only` wrappers over it.
-- `packages/db` (`@jobfinder/db`): Drizzle schema in `src/schema.ts`, the migration runner in `src/migrate.ts`, and checked-in SQL under `drizzle/`. 20 tables today.
+- `packages/db` (`@jobfinder/db`): Drizzle schema in `src/schema.ts`, the migration runner in `src/migrate.ts`, and checked-in SQL under `drizzle/`. 23 tables today.
 - `packages/job-sources` (`@jobfinder/job-sources`): the `SourceConnector` contract, the Greenhouse, Lever, Ashby, RemoteOK, Jobicy and allowlisted JSON-LD connectors, and the hardened `transport.ts`.
 - `packages/matching` (`@jobfinder/matching`): deterministic filters and score aggregation, embedding helpers, the OpenAI client and the response schema.
 - `packages/shared` (`@jobfinder/shared`): Zod contracts, editable defaults, country, keyword and automation logic (schedules, watchlists, alert/digest thresholds, recommendation bands). Node-only hashing is exposed separately as `@jobfinder/shared/hash` so browser bundles stay free of `node:crypto`.
 - `tests/unit`: deterministic Vitest tests. `tests/e2e`: Playwright API and browser tests.
 - `doc`: requirements, architecture and per-phase validation reports.
-- Not present yet: `packages/discovery` (Phase 5), `packages/ai`, `infrastructure/` (deferred). Do not reference them as if they exist.
+- `packages/discovery`: seed-list parsing, safe careers discovery, ATS detection and bounded AI extraction. Company intake and activity are implemented; browser service/captured API replay remain unfinished.
+- Not present yet: `packages/ai`, `apps/crawler`, `infrastructure/` (deferred). Do not reference them as if they exist.
 
 ## Build, Test, and Development Commands
 
@@ -104,3 +105,13 @@ npm run db:generate   # Drizzle: generate SQL from schema changes
 ## Agent Shell Operations
 
 Follow the RTK guidance in your global agent configuration (`RTK.md`): prefix commands with `rtk`, or use `rtk proxy <command>` when raw output is needed, for example `rtk git status --short`. In Claude Code a hook rewrites most commands automatically, so write the plain command and let the hook handle it.
+
+## Company discovery and activity
+
+- Add Company requires only a name and URL; bulk input accepts domains, CSV and TSV. Intake writes owner-scoped candidates and watchlist entries without doing network work in the request.
+- Worker queue `resolve-company` claims Pending candidates, discovers careers/API strategy and schedules the first source scan. Claims use attempt fencing and stale work is recoverable after 15 minutes. Test handlers with injected website fixtures; never let default tests resolve real domains.
+- `activity_events` records live company, scan, AI, application and worker actions. Private events require a user ID. Only generic lifecycle/maintenance events may be shared. Do not log keys, fetched content, resumes, credentials or query strings.
+- Careers resolution checks up to three observed department links when the careers hub has no ATS or structured jobs, honouring robots before selecting an API.
+- AI careers fallback reads bounded HTTP page text (10 pages, 4 calls, 100 jobs), validates evidence and observed links, honours robots, and never marks removals. No JavaScript browser service or authentication bypass is implemented.
+- AI discovery uses the existing key/model and stores conservative per-call estimates against the monthly preference budget. This is not a billing cap; default tests inject extraction and never call OpenAI.
+- Read `doc/company-discovery-validation.md` for implementation coverage and limits.

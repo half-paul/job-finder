@@ -1,6 +1,6 @@
 # JobFinder AI — architecture and delivery plan
 
-Status: Phase 1 + Phase 2 + Phase 3 + Phase 4 implementation, plus keyword import gates and listing archiving. The requirements document remains the product specification. An empty database must never imply invented job listings or AI scores, and no alert, digest or scan result is fabricated while the worker is stopped.
+Status: Phase 1–4 plus company intake, worker careers discovery, bounded HTTP/AI extraction and live activity. The requirements document remains the product specification. An empty database must never imply invented job listings or AI scores, and no alert, digest or scan result is fabricated while the worker is stopped.
 
 ## Architecture
 
@@ -172,9 +172,11 @@ Watchlists, alerts and the digest are deterministic. Watchlist entries are user-
 
 One deliberate boundary remains: the interactive `POST /api/sources/:id` sync still executes the shared engine inside the Next.js request path, because it is an explicit, bounded, user-triggered action with visible progress. All scheduled network work — scans, evaluation, alerts, digests and cleanup — runs only in the worker. Routing the interactive sync through pg-boss as well is the remaining Phase 4 follow-up; it is listed in the validation document rather than implied.
 
-### Phase 5 — advanced discovery (next)
+### Phase 5 — advanced discovery (partially implemented)
 
-Turn the connector platform into a discovery platform in the order below. Each step ships behind its own verification and can stop independently; nothing later depends on the AI step.
+Implemented company intake and worker resolution now cover parts of steps 2–5 and bounded HTTP/AI extraction from step 9. Owner-scoped candidates retain the supplied website URL. A `resolve-company` pg-boss queue discovers careers pages and supported ATS APIs, then creates scheduled sources; custom careers sources use JSON-LD followed by evidence-validated AI extraction. `activity_events` persists private progress and generic worker lifecycle events for live polling. The Companies UI accepts name/URL or bulk CSV/domain input. This does not implement the shared pool, isolated browser service, captured API replay or browser navigation described below. See [current validation and limitations](company-discovery-validation.md).
+
+The remaining target design is described in the order below. Each step ships behind its own verification and can stop independently; nothing later depends on the AI step.
 
 1. **Shared job pool.** Move `jobs`, `job_references` and `companies` to shared records with per-user `job_matches`, `saved_jobs` and archiving, as the schema section already intends. Keep manual entries private. Migrate existing per-owner rows by canonical URL and verify no user gains visibility into another user's manual entries.
 2. **Company discovery.** Add `company_candidates` fed by uploaded seed lists and, where a permitted search API is configured, `site:example.com careers` style queries. Deduplicate by registrable domain. No candidate becomes a `companies` row without a resolved careers URL.

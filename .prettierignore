@@ -8,3 +8,7 @@ doc/AI Job Finder Web App - requirements.md
 AGENTS.md
 
 .superpowers/
+
+.cache/
+
+.vitest/

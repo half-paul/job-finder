@@ -75,7 +75,7 @@ npm run dev
 npm run worker   # second terminal: scheduled scans, alerts, digest, cleanup
 ```
 
-Do not overwrite an existing `.env.local`; add only missing configuration. Root `.env.local` is loaded by development, start, worker and migration commands and ignored by Git/Docker. `DATABASE_URL` is required; `APP_ORIGIN` must exactly match the browser origin for writes. The default is `http://localhost:3000`, not `127.0.0.1`. Secure cookies are enabled for HTTPS origins. `OPENAI_API_KEY` is required only for AI evaluation and the digest narrative; the rest of the workspace runs without it, and a scheduled evaluation without a key records a failure instead of a score. Agent shell operations must prefix commands with `rtk proxy`, per `AGENTS.md`.
+Do not overwrite an existing `.env.local`; add only missing configuration. Root `.env.local` is loaded by development, start, worker and migration commands and ignored by Git/Docker. `DATABASE_URL` is required; `APP_ORIGIN` must exactly match the browser origin for writes. The default is `http://localhost:3000`, not `127.0.0.1`. Secure cookies are enabled for HTTPS origins. `OPENAI_API_KEY` is required for AI evaluation, careers extraction fallback and the digest narrative; the rest of the workspace runs without it, and a scheduled evaluation without a key records a failure instead of a score. Agent shell operations must prefix commands with `rtk proxy`, per `AGENTS.md`.
 
 ## Commands and verification
 
@@ -158,3 +158,17 @@ Before a public deployment: verified email/password recovery or external identit
 Manual jobs belong to their author; future approved connector jobs may be shared. Descriptions are escaped text, never trusted HTML. Unknown salary/seniority/location stay unknown; score filtering excludes unevaluated jobs. Hard preferences block evaluation but do not hide the listing. Timeline/count dates use UTC. The theme toggle applies to the current browser document.
 
 The dev-only Drizzle transitive esbuild dependency is overridden to a patched 0.25 release; migration generation is verified against that override. Infrastructure-as-code is deferred as requested.
+
+## Company import and live activity
+
+Open **Companies** (or **Watchlist**) and enter only the company name and its website or careers URL. **Bulk import** accepts a CSV/text file, tab-separated spreadsheet rows, or pasted domains. Use `name,domain` or `company,url` columns; a domain alone uses the domain as the display name. Up to 500 organizations and 150 KB per UI import are accepted. Results show queued, duplicate and rejected rows with line numbers. Supplied careers paths are preserved, and duplicate hosts (ignoring `www`) are skipped per user.
+
+The worker picks up queued companies on its next minute tick. It checks robots.txt, follows bounded public HTTPS redirects, finds careers links, and identifies Greenhouse, Lever and Ashby APIs. When a careers hub has no ATS or structured listings, it checks up to three linked department pages for a supported API before choosing AI fallback. Otherwise it reads JobPosting JSON-LD, then uses the configured OpenAI model to extract careers navigation and postings from fetched page text. Each proposed URL must have appeared in the page evidence; extracted titles, descriptions and locations must be supported by that text. The model cannot execute tools or submit applications. Resolved sources get a first scan immediately due and then refresh every four hours; change schedules under **Automation**.
+
+**Live activity** on Companies, Watchlist and Automation refreshes every two seconds. It records website/robots requests, HTTP outcomes, source selection, AI extraction, imports, filtering, scan results, evaluation/alerts, digests and worker lifecycle events. Company and scan state survive a reload. Automation also refreshes heartbeat and run counters. Errors stay visible; Retry discovery requeues a failed company. Removing a company disables its source. Private activity is owner-scoped; shared events contain only generic worker lifecycle/maintenance information. Activity is retained for 90 days.
+
+Custom careers extraction is bounded to 10 pages, four AI calls and 100 postings per scan. It reads HTTP page content; JavaScript-only sites, login walls and CAPTCHAs are not bypassed. Unsupported layouts report a visible failure, and capped walks report Partial. Custom careers scans never mark old listings removed because the full inventory cannot be proven. A missing AI key or unavailable robots policy is a visible failure. No browser crawler service is deployed by this change; existing captured-API/browser scaffolding remains unfinished.
+
+Each AI extraction call records a conservative $0.05 estimate, including failures, against the existing monthly preference budget and stored match estimates. This assumes default model pricing and is **not a hard billing cap** or actual token accounting. The existing key and `OPENAI_EXPLANATION_MODEL` are reused. Tests inject website and model fixtures; they make no paid calls.
+
+For changed code, rebuild both local services with `docker compose up --build -d --wait`; `restart` alone does not rebuild an image. See [company discovery validation](doc/company-discovery-validation.md).
