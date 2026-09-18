@@ -121,35 +121,39 @@ export async function deleteWatchlist(
   userId: string,
   id: string,
 ) {
-  const [existing] = await db
-    .select()
-    .from(companyWatchlists)
-    .where(
-      and(eq(companyWatchlists.id, id), eq(companyWatchlists.userId, userId)),
-    );
-  if (!existing) throw new AppError(404, "Watchlist entry not found.");
-  await db
-    .delete(companyCandidates)
-    .where(
-      and(
-        eq(companyCandidates.watchlistId, id),
-        eq(companyCandidates.userId, userId),
-      ),
-    );
-  await db.delete(companyWatchlists).where(eq(companyWatchlists.id, id));
-  // Disable rather than delete: imported provenance stays intact and the
-  // scheduled scan stops without removing the user's listings.
-  if (existing.sourceId)
-    await db
-      .update(jobSources)
-      .set({ enabled: false, schedule: "Manual", nextRunAt: null })
+  // One transaction: a failure part way through must not leave candidates
+  // deleted while the entry they belong to is still listed.
+  return db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(companyWatchlists)
+      .where(
+        and(eq(companyWatchlists.id, id), eq(companyWatchlists.userId, userId)),
+      );
+    if (!existing) throw new AppError(404, "Watchlist entry not found.");
+    await tx
+      .delete(companyCandidates)
       .where(
         and(
-          eq(jobSources.id, existing.sourceId),
-          eq(jobSources.ownerId, userId),
+          eq(companyCandidates.watchlistId, id),
+          eq(companyCandidates.userId, userId),
         ),
       );
-  return { id };
+    await tx.delete(companyWatchlists).where(eq(companyWatchlists.id, id));
+    // Disable rather than delete: imported provenance stays intact and the
+    // scheduled scan stops without removing the user's listings.
+    if (existing.sourceId)
+      await tx
+        .update(jobSources)
+        .set({ enabled: false, schedule: "Manual", nextRunAt: null })
+        .where(
+          and(
+            eq(jobSources.id, existing.sourceId),
+            eq(jobSources.ownerId, userId),
+          ),
+        );
+    return { id };
+  });
 }
 
 export async function ensureWatchlistSource(
