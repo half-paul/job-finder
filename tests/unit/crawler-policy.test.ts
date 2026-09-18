@@ -4,7 +4,12 @@ import {
   crawlerUserAgent,
   hostAllowed,
   looksLikeCaptcha,
+  navigationChain,
   publicAddressAllowed,
+  refuseNavigationChain,
+  resolvesToPublicAddress,
+  type NavigationRequest,
+  type NavigationResponse,
 } from "../../apps/crawler/src/policy";
 
 describe("crawler policy", () => {
@@ -84,6 +89,144 @@ describe("crawler policy", () => {
       expect(publicAddressAllowed("::ffff:169.254.169.254")).toBe(false);
       expect(publicAddressAllowed("::ffff:127.0.0.1")).toBe(false);
       expect(publicAddressAllowed("::ffff:10.0.0.1")).toBe(false);
+    });
+  });
+
+  /**
+   * These drive the enforcement path, not just the predicate. `context.route`
+   * never sees a redirect hop — Chromium follows a 302 internally — so the
+   * defence lives in `navigationChain` + `refuseNavigationChain`, and
+   * `session.ts` is a thin call into exactly the logic exercised here.
+   */
+  describe("redirect chain enforcement", () => {
+    /** Builds the `redirectedFrom()`-linked request list Playwright hands us. */
+    const chainOf = (...hops: string[]): NavigationResponse => {
+      let request: NavigationRequest | null = null;
+      for (const href of hops) {
+        const previous: NavigationRequest | null = request;
+        request = { url: () => href, redirectedFrom: () => previous };
+      }
+      const last = request;
+      if (!last) throw new Error("A chain needs at least one hop");
+      return { request: () => last, url: () => hops[hops.length - 1] };
+    };
+
+    /** A stand-in resolver: anything not listed is treated as public. */
+    const resolver =
+      (privateHosts: string[]) =>
+      (hostname: string): Promise<boolean> =>
+        Promise.resolve(!privateHosts.includes(hostname));
+
+    const allPublic = () => Promise.resolve(true);
+
+    it("lists every hop the navigation touched, oldest first", () => {
+      const response = chainOf(
+        "https://acme.example/careers",
+        "https://acme.example/jobs",
+      );
+      expect(navigationChain(response, "https://acme.example/jobs")).toEqual([
+        "https://acme.example/careers",
+        "https://acme.example/jobs",
+        "https://acme.example/jobs",
+        "https://acme.example/jobs",
+      ]);
+    });
+
+    it("still checks the settled URL when there is no response object", () => {
+      expect(navigationChain(null, "https://acme.example/jobs")).toEqual([
+        "https://acme.example/jobs",
+      ]);
+    });
+
+    it("refuses a redirect chain that ends at a private address", async () => {
+      const response = chainOf(
+        "https://acme.example/careers",
+        "https://metadata.acme.example/latest",
+      );
+      const refusal = await refuseNavigationChain(
+        navigationChain(response, "https://metadata.acme.example/latest"),
+        origin,
+        resolver(["metadata.acme.example"]),
+      );
+      expect(refusal).toEqual({
+        url: "https://metadata.acme.example/latest",
+        reason: "resolves to a non-public address",
+      });
+    });
+
+    it("refuses a private hop in the middle of an otherwise fine chain", async () => {
+      const response = chainOf(
+        "https://acme.example/careers",
+        "https://internal.acme.example/hop",
+        "https://acme.example/jobs",
+      );
+      const refusal = await refuseNavigationChain(
+        navigationChain(response, "https://acme.example/jobs"),
+        origin,
+        resolver(["internal.acme.example"]),
+      );
+      expect(refusal?.url).toBe("https://internal.acme.example/hop");
+    });
+
+    it("refuses a redirect off-host or off HTTPS even when the address is public", async () => {
+      const offHost = await refuseNavigationChain(
+        navigationChain(
+          chainOf("https://acme.example/careers", "https://evil.example/x"),
+          "https://evil.example/x",
+        ),
+        origin,
+        allPublic,
+      );
+      expect(offHost?.url).toBe("https://evil.example/x");
+
+      const plainHttp = await refuseNavigationChain(
+        navigationChain(
+          chainOf("https://acme.example/careers", "http://acme.example/jobs"),
+          "http://acme.example/jobs",
+        ),
+        origin,
+        allPublic,
+      );
+      expect(plainHttp?.url).toBe("http://acme.example/jobs");
+    });
+
+    it("refuses a URL the browser settled on that no redirect response reported", async () => {
+      const refusal = await refuseNavigationChain(
+        navigationChain(
+          chainOf("https://acme.example/careers"),
+          "https://internal.acme.example/",
+        ),
+        origin,
+        resolver(["internal.acme.example"]),
+      );
+      expect(refusal?.url).toBe("https://internal.acme.example/");
+    });
+
+    it("allows a clean chain, including a hop onto a recognised ATS host", async () => {
+      const refusal = await refuseNavigationChain(
+        navigationChain(
+          chainOf(
+            "https://acme.example/careers",
+            "https://boards.greenhouse.io/acme",
+          ),
+          "https://boards.greenhouse.io/acme",
+        ),
+        origin,
+        allPublic,
+      );
+      expect(refusal).toBeNull();
+    });
+
+    it("resolves a real hostname and refuses one that points at loopback", async () => {
+      // No network: `localhost` resolves from the hosts file, and an IP
+      // literal short-circuits the resolver entirely.
+      await expect(resolvesToPublicAddress("localhost")).resolves.toBe(false);
+      await expect(resolvesToPublicAddress("169.254.169.254")).resolves.toBe(
+        false,
+      );
+      await expect(resolvesToPublicAddress("93.184.216.34")).resolves.toBe(
+        true,
+      );
     });
   });
 });

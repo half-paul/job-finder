@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import type { LookupAddress } from "node:dns";
 import { lookup } from "node:dns/promises";
 import { registrableDomain, atsHostPattern } from "@jobfinder/discovery";
 import { isPublicAddress } from "@jobfinder/job-sources";
@@ -82,7 +83,7 @@ export async function resolvesToPublicAddress(
 ): Promise<boolean> {
   if (isIP(hostname)) return publicAddressAllowed(hostname);
   try {
-    const records = await lookup(hostname, { all: true });
+    const records = await lookupWithin(hostname, dnsTimeoutMs);
     return (
       records.length > 0 &&
       records.every((record) => publicAddressAllowed(record.address))
@@ -90,4 +91,153 @@ export async function resolvesToPublicAddress(
   } catch {
     return false;
   }
+}
+
+/** A resolver that never answers must not be able to stall us indefinitely. */
+const dnsTimeoutMs = 3_000;
+
+/**
+ * `dns.lookup` is bounded only by the operating system's resolver, and each
+ * in-flight call occupies one of libuv's four default threadpool slots for
+ * its whole duration. A hostile or merely broken resolver could therefore
+ * hold every navigation — and unrelated threadpool work elsewhere in the
+ * process — hostage. This races the lookup against a timer so the caller is
+ * released on time.
+ *
+ * The rejection is deliberate rather than a `false` return: it lands in
+ * `resolvesToPublicAddress`'s existing `catch`, which fails closed, so a
+ * lookup we could not finish is treated exactly like one that came back
+ * private. Node offers no way to cancel an in-flight `lookup`, so the
+ * abandoned call still occupies its slot until the OS gives up; what this
+ * bounds is how long *we* wait on it, which is what starves navigations.
+ */
+async function lookupWithin(
+  hostname: string,
+  ms: number,
+): Promise<LookupAddress[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      lookup(hostname, { all: true }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`DNS lookup for ${hostname} timed out`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * A hostname and address check applied to one URL. Both the browser session's
+ * redirect-chain validation and the robots.txt fetch call this, so there is
+ * exactly one definition of "a hop we are willing to follow" and the two
+ * paths cannot drift.
+ *
+ * `isPublic` is injected rather than called directly so the caller can supply
+ * its per-session memoised resolver — and so the logic is testable without a
+ * network or a browser.
+ */
+export interface HopRefusal {
+  /** The URL that was refused, for the plain-language failure message. */
+  url: string;
+  /** Why, in plain language, without a trailing full stop. */
+  reason: string;
+}
+
+export async function refuseHop(
+  href: string,
+  origin: URL,
+  isPublic: (hostname: string) => Promise<boolean>,
+): Promise<HopRefusal | null> {
+  let target: URL;
+  try {
+    target = new URL(href);
+  } catch {
+    return { url: href, reason: "is not a usable URL" };
+  }
+  if (!hostAllowed(target, origin))
+    return {
+      url: href,
+      reason: `is not HTTPS on ${origin.hostname}'s own domain or a recognised ATS host`,
+    };
+  if (!(await isPublic(target.hostname)))
+    return { url: href, reason: "resolves to a non-public address" };
+  return null;
+}
+
+/**
+ * Validates every URL a navigation touched — the URL we asked for, each
+ * redirect hop, and the URL the page actually settled on — and returns the
+ * first one we refuse, or `null` when the whole chain is acceptable.
+ *
+ * This exists because `context.route` does not see redirect hops: with
+ * `route.continue()` a 302 produces exactly one route event, for the initial
+ * URL, and Chromium then follows the redirect internally. A careers page that
+ * redirects to `http://169.254.169.254/` would otherwise be fetched and its
+ * body handed back to the caller. Every hop must pass the same checks the
+ * initial request did, and the HTML must not be read until they all have.
+ *
+ * Duplicate hrefs are checked once: a chain commonly repeats its final URL
+ * (the response's URL and the page's settled URL are the same string), and
+ * re-checking costs a map lookup for no extra safety.
+ */
+export async function refuseNavigationChain(
+  chain: readonly string[],
+  origin: URL,
+  isPublic: (hostname: string) => Promise<boolean>,
+): Promise<HopRefusal | null> {
+  const checked = new Set<string>();
+  for (const href of chain) {
+    if (checked.has(href)) continue;
+    checked.add(href);
+    const refusal = await refuseHop(href, origin, isPublic);
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
+/**
+ * The slice of Playwright's `Request`/`Response` that `navigationChain` needs.
+ * Declared structurally so this module — and the tests for it — stay free of
+ * a Playwright import; the real objects satisfy these shapes as they are.
+ */
+export interface NavigationRequest {
+  url(): string;
+  redirectedFrom(): NavigationRequest | null;
+}
+
+export interface NavigationResponse {
+  request(): NavigationRequest;
+  url(): string;
+}
+
+/**
+ * Every URL a navigation touched, oldest hop first: the request we issued,
+ * each redirect Chromium followed on its own, the URL the response came from,
+ * and the URL the page settled on (which also catches a `<meta refresh>` or a
+ * script-driven `location` change that produced no redirect response at all).
+ *
+ * `redirectedFrom()` walks backwards one hop at a time, so the list is built
+ * by unshifting. Duplicates are expected and harmless — the validator checks
+ * each distinct href once.
+ */
+export function navigationChain(
+  response: NavigationResponse | null,
+  settledUrl: string,
+): string[] {
+  const chain: string[] = [];
+  if (response) {
+    let request: NavigationRequest | null = response.request();
+    while (request) {
+      chain.unshift(request.url());
+      request = request.redirectedFrom();
+    }
+    chain.push(response.url());
+  }
+  chain.push(settledUrl);
+  return chain;
 }

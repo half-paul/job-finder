@@ -4,6 +4,8 @@ import {
   crawlerUserAgent,
   hostAllowed,
   looksLikeCaptcha,
+  navigationChain,
+  refuseNavigationChain,
   resolvesToPublicAddress,
 } from "./policy";
 import { CrawlerFailure } from "./failure";
@@ -119,6 +121,40 @@ export async function withSession<T>(
       }
       return route.continue();
     });
+    // `context.route` does not intercept WebSockets at all, so without this a
+    // page's own JavaScript could open `wss://internal-host/` and read the
+    // answer with none of the checks above applied. Playwright 1.63 does
+    // expose `routeWebSocket`, so we can hold every socket and decide.
+    //
+    // The matcher is `() => true` deliberately: a URL pattern that failed to
+    // match would leave that socket unrouted and therefore unchecked, which
+    // is the failure mode we are here to remove. A refused socket is closed
+    // with 1008 ("policy violation") and a reason the page can see; an
+    // allowed one is joined to the real server with `connectToServer()`.
+    // Playwright does not open a server connection unless that is called, so
+    // the `await` below cannot leak a connection while it resolves.
+    await context.routeWebSocket(
+      () => true,
+      async (ws) => {
+        const refused = (reason: string) => ws.close({ code: 1008, reason });
+        let target: URL;
+        try {
+          target = new URL(ws.url());
+        } catch {
+          return refused("Unusable WebSocket URL");
+        }
+        // `hostAllowed` speaks HTTP(S); `wss:`/`ws:` map onto `https:`/`http:`
+        // one-for-one, and the `ws:` mapping to `http:` is what makes an
+        // unencrypted socket fail the same HTTPS-only rule a page load does.
+        const asHttp = new URL(target.href);
+        asHttp.protocol = target.protocol === "ws:" ? "http:" : "https:";
+        if (!hostAllowed(asHttp, origin))
+          return refused("WebSocket host is not allowed for this crawl");
+        if (!(await isHostPublic(target.hostname)))
+          return refused("WebSocket host resolves to a non-public address");
+        ws.connectToServer();
+      },
+    );
     const page = await context.newPage();
     const session: Session = {
       async open(url) {
@@ -168,6 +204,24 @@ export async function withSession<T>(
               error.name === "TimeoutError" ? "timeout" : "navigation";
             throw new CrawlerFailure(error.message, kind);
           });
+        // Before the status is read and long before the HTML is: with
+        // `route.continue()`, a 302 produces exactly one route event — for
+        // the URL we asked for — and Chromium then follows the redirect
+        // internally, so the route handler above never sees the target. A
+        // careers page that redirects to `http://169.254.169.254/` would
+        // otherwise be fetched and its body returned to the caller. Checking
+        // the status first would leak too: the refused host's HTTP code would
+        // reach the caller in the failure message.
+        const refusal = await refuseNavigationChain(
+          navigationChain(response, page.url()),
+          origin,
+          isHostPublic,
+        );
+        if (refusal)
+          throw new CrawlerFailure(
+            `Refusing ${refusal.url}: ${refusal.reason}`,
+            "blocked",
+          );
         if (response && response.status() >= 400)
           throw new CrawlerFailure(
             `HTTP ${response.status()} from ${url.hostname}`,
