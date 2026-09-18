@@ -38,8 +38,15 @@ function log(
 // rejection by default; this is what stops that from being reintroduced
 // silently.
 process.on("unhandledRejection", (reason) => {
+  // This line must read as a fault, not routine noise: every place we know
+  // about (session.ts's response listener) already catches its own
+  // rejections, so anything reaching here is a bug somewhere that let one
+  // escape — worth paging on, not scrolling past.
   log("error", "crawler.unhandled_rejection", {
+    fault:
+      "An async rejection escaped every local .catch() — this should be impossible; a bug let it through",
     error: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
   });
 });
 
@@ -95,8 +102,34 @@ const readBody = (stream: IncomingMessage, limit = 64 * 1024) =>
 
 const server = createServer(async (req, res) => {
   const send = (status: number, payload: unknown) => {
+    // Serialised BEFORE the head is written, deliberately: writing the
+    // status line first and only then discovering the body can't be built
+    // (a `RangeError` from stringifying something too deeply nested, in
+    // particular — see `capture.ts`'s `sample` depth bound, which now
+    // exists precisely so this branch stays cold) commits a response the
+    // caller can never get a matching body for. `res.writeHead` is not
+    // undoable. This protects every endpoint that calls `send`, not only
+    // `/capture`.
+    let body: string;
+    try {
+      body = JSON.stringify(payload);
+    } catch (error) {
+      log("error", "crawler.serialization_failed", {
+        url: req.url,
+        method: req.method,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: "Failed to serialise response",
+          kind: "internal",
+        }),
+      );
+      return;
+    }
     res.writeHead(status, { "content-type": "application/json" });
-    res.end(JSON.stringify(payload));
+    res.end(body);
   };
   const fail = (status: number, error: string, kind: CrawlerError["kind"]) => {
     // This service is reachable on the Compose network and runs untrusted pages,

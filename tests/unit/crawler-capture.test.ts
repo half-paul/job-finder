@@ -139,4 +139,73 @@ describe("capture warnings", () => {
       response.warnings.some((w) => w.includes("Dropped a capture pattern")),
     ).toBe(true);
   });
+
+  it("truncates a warning whose URL would push it past the 500-char schema bound", async () => {
+    const { session, emitSkip, finishOpen } = fakeSession();
+    const origin = new URL("https://acme.example/careers");
+    const result = captureFromSession(session, origin);
+    // A ~600-char pathname alone, before the "Skipped a JSON response
+    // from …: …" wrapper text is even added, is already past
+    // captureResponseSchema's per-warning cap of 500. If `warn()` didn't
+    // truncate, this would throw inside `captureResponseSchema.parse` and
+    // the whole capture — every pattern and every warning — would be lost.
+    const longPath = `/${"a".repeat(600)}`;
+    emitSkip(`https://acme.example${longPath}`, "is over the capture limit");
+    finishOpen();
+    const response = await result;
+    expect(response.warnings).toHaveLength(1);
+    expect(response.warnings[0]!.length).toBeLessThanOrEqual(500);
+  });
+
+  it("strips the query string from a URL mentioned in a warning", async () => {
+    const { session, emitSkip, finishOpen } = fakeSession();
+    const origin = new URL("https://acme.example/careers");
+    const result = captureFromSession(session, origin);
+    emitSkip(
+      "https://acme.example/api/jobs?token=super-secret-value",
+      "is over the capture limit",
+    );
+    finishOpen();
+    const response = await result;
+    const warning = response.warnings.find((w) => w.includes("api/jobs"));
+    expect(warning).toBeDefined();
+    expect(warning).not.toContain("token");
+    expect(warning).not.toContain("super-secret-value");
+    expect(warning).not.toContain("?");
+  });
+
+  it("bounds deeply nested junk in a sample so the response still serialises", async () => {
+    const { session, emit, finishOpen } = fakeSession();
+    const origin = new URL("https://acme.example/careers");
+    const result = captureFromSession(session, origin);
+    // The same shape C1 exploited through postingArrayPointer's search, now
+    // aimed at a field the search never looks at: a real title/url pair
+    // sitting next to junk nested far past the stack's comfort zone.
+    let junk: unknown = "leaf";
+    for (let i = 0; i < 5000; i++) junk = { junk };
+    const body = {
+      data: {
+        results: [
+          { title: "A", url: "/a", junk },
+          { title: "B", url: "/b" },
+        ],
+      },
+    };
+    await emit(
+      {
+        url: "https://acme.example/api/jobs",
+        method: "GET",
+        headers: {},
+        body: null,
+      },
+      body,
+    );
+    finishOpen();
+    const response = await result;
+    expect(response.patterns).toHaveLength(1);
+    // The real bug this guards was index.ts's JSON.stringify(payload)
+    // throwing on a body exactly this shape; reproducing that call here
+    // is the point, not an implementation detail.
+    expect(() => JSON.stringify(response)).not.toThrow();
+  });
 });
