@@ -123,7 +123,7 @@ Maintain a provider registry with approved hosts, API/access documentation, requ
 
 ### Crawler isolation boundary
 
-Rungs 3 and 4 run in `apps/crawler`, a separate Node/Playwright process reachable only from `apps/worker`, over a bearer secret (`CRAWLER_SECRET`), never from the browser or from any public network. It holds no database credentials — it is never given `DATABASE_URL`, by configuration and by Compose network topology (below) — and returns only validated, size-bounded JSON: a set of postings or a captured request pattern, never a raw page or arbitrary bytes.
+Rungs 3 and 4 run in `apps/crawler`, a separate Node/Playwright process reachable only from `apps/worker`, over a bearer secret (`CRAWLER_SECRET`), never from the browser or from any public network. It holds no database credentials — `compose.yaml`'s `crawler` service has no `env_file` at all (unlike `web` and `worker`, which both load `.env.local`), so there is no configuration path by which `DATABASE_URL` or `OPENAI_API_KEY` could reach it, on top of the Compose network topology below that would refuse the connection anyway — and returns only validated, size-bounded JSON: a set of postings or a captured request pattern, never a raw page or arbitrary bytes.
 
 Because it navigates pages nobody has vetted, its SSRF defence is layered:
 

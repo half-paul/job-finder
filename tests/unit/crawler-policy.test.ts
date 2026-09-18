@@ -3,6 +3,7 @@ import {
   blockedResource,
   crawlerUserAgent,
   hostAllowed,
+  insecureModeAllowed,
   looksLikeCaptcha,
   navigationChain,
   publicAddressAllowed,
@@ -11,6 +12,7 @@ import {
   type NavigationRequest,
   type NavigationResponse,
 } from "../../apps/crawler/src/policy";
+import { tlsVerificationDisabled } from "../../apps/crawler/src/session";
 
 describe("crawler policy", () => {
   const origin = new URL("https://acme.example/careers");
@@ -253,6 +255,80 @@ describe("crawler policy", () => {
         // not a general SSRF bypass.
         await expect(resolvesToPublicAddress("localhost")).resolves.toBe(false);
       });
+    });
+  });
+
+  // Fix round 2, P2: pins both production gates directly, so a regression in
+  // either `insecureTestHostnameAllowed` (policy.ts) or the TLS gate
+  // (`tlsVerificationDisabled`, session.ts) fails a test instead of only
+  // being caught by manual live injection, as it was in fix round 1.
+  describe("production refuses both insecure gates outright (NODE_ENV allow-list)", () => {
+    // Next.js's own global type augmentation declares `NODE_ENV` `readonly`
+    // and narrows it to `'development' | 'production' | 'test'`, which is
+    // right for application code but blocks a test from setting it at all.
+    // This cast is local to this test file and does not affect the type any
+    // other module sees `process.env.NODE_ENV` as.
+    const env = process.env as { [key: string]: string | undefined };
+    const nodeEnvKey = "NODE_ENV";
+    const hostnameKey = "CRAWLER_INSECURE_TEST_HOSTNAME";
+    const tlsKey = "CRAWLER_INSECURE_TLS";
+    const original = {
+      nodeEnv: env[nodeEnvKey],
+      hostname: env[hostnameKey],
+      tls: env[tlsKey],
+    };
+    // Vitest itself runs under NODE_ENV=test, so every test in this block
+    // must restore it — leaking a NODE_ENV=production override into a later
+    // test file would silently change behaviour there too.
+    afterEach(() => {
+      for (const [key, value] of Object.entries({
+        [nodeEnvKey]: original.nodeEnv,
+        [hostnameKey]: original.hostname,
+        [tlsKey]: original.tls,
+      })) {
+        if (value === undefined) delete env[key];
+        else env[key] = value;
+      }
+    });
+
+    it("refuses the hostname gate under NODE_ENV=production, even with the var set", async () => {
+      env[nodeEnvKey] = "production";
+      env[hostnameKey] = "host.docker.internal";
+      await expect(
+        resolvesToPublicAddress("host.docker.internal"),
+      ).resolves.toBe(false);
+    });
+
+    it("refuses the TLS gate under NODE_ENV=production, even with the var set", () => {
+      env[nodeEnvKey] = "production";
+      env[tlsKey] = "1";
+      expect(tlsVerificationDisabled()).toBe(false);
+    });
+
+    it('refuses both gates on an unrecognised NODE_ENV value, not only the literal string "production" — an allow-list fails closed on a typo', () => {
+      env[nodeEnvKey] = "Production";
+      env[hostnameKey] = "host.docker.internal";
+      env[tlsKey] = "1";
+      expect(insecureModeAllowed()).toBe(false);
+      expect(tlsVerificationDisabled()).toBe(false);
+    });
+
+    it("refuses both gates when NODE_ENV is unset, the posture apps/crawler/Dockerfile's own ENV NODE_ENV=production exists to avoid outside Compose", () => {
+      delete env[nodeEnvKey];
+      env[hostnameKey] = "host.docker.internal";
+      env[tlsKey] = "1";
+      expect(insecureModeAllowed()).toBe(false);
+      expect(tlsVerificationDisabled()).toBe(false);
+    });
+
+    it("allows both gates once NODE_ENV is an explicit, known non-production value", async () => {
+      env[nodeEnvKey] = "test";
+      env[hostnameKey] = "host.docker.internal";
+      env[tlsKey] = "1";
+      await expect(
+        resolvesToPublicAddress("host.docker.internal"),
+      ).resolves.toBe(true);
+      expect(tlsVerificationDisabled()).toBe(true);
     });
   });
 });

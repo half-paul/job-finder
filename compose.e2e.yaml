@@ -16,14 +16,15 @@
 #   to resolve to a private address. It is not documented in .env.example
 #   and is never set in compose.yaml.
 # - NODE_ENV overrides compose.yaml's `NODE_ENV: production` for this
-#   service only. That value is the *real* barrier against the three
-#   insecure vars above: apps/crawler/src/policy.ts and session.ts refuse
-#   all of them outright whenever NODE_ENV is "production", specifically
-#   because compose.yaml's crawler service still keeps `env_file:
-#   .env.local` — an operator's own file, undocumented variable or not —
-#   so the env vars alone were only undiscovered, not unreachable. This
-#   overlay has to un-set that backstop to let its own fixture-only values
-#   take effect; nothing else may do so.
+#   service only. apps/crawler/src/policy.ts and session.ts refuse all
+#   three insecure vars above outright whenever NODE_ENV is "production",
+#   so this override is what lets the values this file sets directly (below)
+#   take effect at all; nothing else may unset it. This is the ONLY
+#   configuration path for any of the three: compose.yaml's crawler service
+#   has no `env_file`, on purpose (see its own comment — the crawler must
+#   never be able to receive DATABASE_URL/OPENAI_API_KEY from an operator's
+#   `.env.local` either), so unlike every other service here it cannot pick
+#   these up from a file at all, in production or in this overlay.
 # - extra_hosts makes host.docker.internal resolvable from inside the
 #   container on Linux (the `host-gateway` special value), not only on
 #   Docker Desktop; the e2e fixture server binds to the CI runner/host itself.

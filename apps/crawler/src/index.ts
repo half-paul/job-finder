@@ -6,6 +6,7 @@ import {
   type CrawlerError,
 } from "@jobfinder/shared";
 import { CrawlerFailure } from "./failure";
+import { insecureModeAllowed } from "./policy";
 
 /** Thrown by `readBody` on the oversize path — a client fault, not ours. */
 class PayloadTooLargeError extends Error {}
@@ -17,18 +18,18 @@ if (!secret) throw new Error("CRAWLER_SECRET is required. See README.md.");
 /** What `/health` reports itself as — see the route below. */
 const serviceIdentity = "jobfinder-crawler";
 
-// M1 fix-round hardening, belt and braces alongside the direct NODE_ENV
-// checks in policy.ts (`insecureTestHostnameAllowed`) and session.ts (the
-// `ignoreHTTPSErrors` gate): `NODE_TLS_REJECT_UNAUTHORIZED` is read by
-// Node's own TLS internals on every connection, not by any call site of
-// ours, so there is nothing in our code to gate against it directly. The
-// only way to refuse it in production is to remove it from the environment
-// before the first network call — which happens well after this module
-// finishes loading, so doing it here, once, at the top is early enough.
-// `compose.yaml`'s crawler service sets `NODE_ENV: production` in its own
-// `environment:` block, which Compose gives precedence over `env_file`, so
-// a developer's `.env.local` cannot flip it back for this one service.
-if (process.env.NODE_ENV === "production") {
+// M1 fix-round hardening, belt and braces alongside the shared
+// `insecureModeAllowed()` checks in policy.ts (`insecureTestHostnameAllowed`)
+// and session.ts (the `ignoreHTTPSErrors` gate): `NODE_TLS_REJECT_UNAUTHORIZED`
+// is read by Node's own TLS internals on every connection, not by any call
+// site of ours, so there is nothing in our code to gate against it directly.
+// The only way to refuse it outside a known-safe environment is to remove it
+// from the environment before the first network call — which happens well
+// after this module finishes loading, so doing it here, once, at the top is
+// early enough. `compose.yaml`'s crawler service sets `NODE_ENV: production`
+// in its own `environment:` block; `compose.e2e.yaml` overrides it to
+// `"test"` for the crawler service only, and nothing else may.
+if (!insecureModeAllowed()) {
   delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
 }
 

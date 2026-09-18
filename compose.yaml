@@ -95,18 +95,30 @@ services:
       context: .
       dockerfile: apps/crawler/Dockerfile
     command: npm run crawler
-    env_file:
-      - path: .env.local
-        required: false
+    # Deliberately no `env_file`, unlike every other service here: this
+    # container's whole job is rendering untrusted pages, so it must not be
+    # able to receive DATABASE_URL, OPENAI_API_KEY or anything else an
+    # operator's .env.local happens to hold. It needs exactly PORT,
+    # CRAWLER_SECRET and NODE_ENV, all inline below — nothing implicit.
+    # (Fix round 2: `env_file` used to be listed here "for completeness"
+    # with the other services; that was the actual hole behind the
+    # AGENTS.md/architecture.md "never given DATABASE_URL" claim, since
+    # `env_file` loads the whole file regardless of which keys the comment
+    # says are excluded. It was also M1's root cause: with no `.env.local`
+    # reaching this container, CRAWLER_INSECURE_TEST_HOSTNAME/
+    # CRAWLER_INSECURE_TLS/NODE_TLS_REJECT_UNAUTHORIZED now have no ordinary
+    # configuration path at all, and the NODE_ENV refusal below is belt to
+    # that braces rather than the only barrier.)
     environment:
       PORT: "4000"
       CRAWLER_SECRET: local-development-only
       # Load-bearing, not cosmetic: apps/crawler/src/policy.ts and session.ts
       # refuse their test-only insecure-SSRF/TLS escape hatches outright
-      # whenever NODE_ENV is "production", regardless of what CRAWLER_INSECURE_*
-      # env vars this service's own `env_file: .env.local` line might supply.
-      # Compose gives an explicit `environment:` entry precedence over
-      # `env_file`, so a developer's own .env.local cannot override this back.
+      # whenever NODE_ENV is "production". With `env_file` gone this is no
+      # longer the only thing standing between an operator's own
+      # configuration and those escape hatches, but it stays as defence in
+      # depth (and is the only thing that stops someone re-adding env_file
+      # later without also re-opening this hole).
       NODE_ENV: production
     # Deliberately no DATABASE_URL and no published port: the crawler runs
     # untrusted pages and must not be able to reach PostgreSQL or the host.

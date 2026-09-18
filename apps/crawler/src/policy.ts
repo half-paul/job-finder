@@ -95,6 +95,31 @@ export async function resolvesToPublicAddress(
 }
 
 /**
+ * Node's conventional non-production `NODE_ENV` values. An allow-list, not a
+ * deny-list, on purpose (fix round 2, P3): checking `NODE_ENV ===
+ * "production"` fails OPEN on anything unanticipated — a typo
+ * ("Production", "produciton"), a differently-cased value, or simply
+ * running the crawler somewhere `NODE_ENV` was never set at all (see
+ * `apps/crawler/Dockerfile`'s own `ENV NODE_ENV=production`, which exists so
+ * even *that* case now has an explicit value to check). Checking membership
+ * in this set instead fails CLOSED: only an exact, known, deliberately-set
+ * value permits the insecure paths below at all. Only `compose.e2e.yaml`
+ * sets `NODE_ENV` for the crawler service, and it sets exactly `"test"`.
+ */
+const knownNonProductionNodeEnvs = new Set(["development", "test"]);
+
+/**
+ * True only when `NODE_ENV` is explicitly one of `knownNonProductionNodeEnvs`.
+ * Shared by `insecureTestHostnameAllowed` below and the `ignoreHTTPSErrors`
+ * gate in `session.ts`, so the two insecure escape hatches cannot drift on
+ * what counts as "safe to allow" — see the file-level comment on the set
+ * above for why this is an allow-list rather than a `!== "production"` check.
+ */
+export function insecureModeAllowed(): boolean {
+  return knownNonProductionNodeEnvs.has(process.env.NODE_ENV ?? "");
+}
+
+/**
  * TEST-ONLY escape hatch. `tests/e2e/crawler.spec.ts` serves its fixture at
  * `https://host.docker.internal:<port>`, which resolves into private address
  * space and is correctly refused by `publicAddressAllowed` below — that
@@ -106,25 +131,24 @@ export async function resolvesToPublicAddress(
  * - `CRAWLER_INSECURE_TEST_HOSTNAME` is unset by default, so this returns
  *   `false` for every hostname with no code change required to keep it off,
  *   and it is not documented in `.env.example` or set in `compose.yaml`.
- * - `NODE_ENV === "production"` refuses it outright, checked first and
- *   before the env var is even read. This is the real barrier, not the
- *   line above: `compose.yaml`'s `crawler` service also keeps
- *   `env_file: .env.local` (the one file the README tells every operator to
- *   create), so the env var alone is undiscovered rather than unreachable —
- *   an operator's own `.env.local` could still set it. `compose.yaml` sets
- *   `NODE_ENV: production` in the service's own `environment:` block, which
- *   Compose gives precedence over `env_file`, so `.env.local` cannot
- *   override it back for this one service. `compose.e2e.yaml` overrides
- *   `NODE_ENV` again (to a non-production value) for the e2e run only.
+ * - `insecureModeAllowed()` must first return `true`, checked before the env
+ *   var is even read. This is the real barrier, not the line above:
+ *   `compose.yaml`'s `crawler` service intentionally has no `env_file` (see
+ *   its own comment), so there is no file-based path to this variable at
+ *   all in the shipped configuration, but the `NODE_ENV` check stays as
+ *   defence in depth against `env_file` being re-added later without
+ *   re-reading this comment. `compose.yaml` sets `NODE_ENV: production` on
+ *   the crawler service's `environment:` block; `compose.e2e.yaml` overrides
+ *   it to `"test"` for the e2e run only, and nothing else may.
  * - Even fully set and even outside production, it allows one exact
  *   hostname string, so it cannot be repurposed into a general SSRF bypass
  *   by pointing a different hostname at a private address.
  *
  * Follows the same gate pattern as `CRAWLER_INSECURE_TLS` in `session.ts`,
- * which gets the identical `NODE_ENV` guard for the same reason.
+ * which gets the identical `insecureModeAllowed()` guard for the same reason.
  */
 function insecureTestHostnameAllowed(hostname: string): boolean {
-  if (process.env.NODE_ENV === "production") return false;
+  if (!insecureModeAllowed()) return false;
   const allowed = process.env.CRAWLER_INSECURE_TEST_HOSTNAME?.trim();
   return Boolean(allowed) && hostname === allowed;
 }

@@ -8,6 +8,7 @@ import {
   blockedResource,
   crawlerUserAgent,
   hostAllowed,
+  insecureModeAllowed,
   looksLikeCaptcha,
   navigationChain,
   refuseHop,
@@ -17,6 +18,24 @@ import {
 } from "./policy";
 import { CrawlerFailure } from "./failure";
 import { fetchRobots } from "./robots";
+
+/**
+ * Whether the browser context should skip TLS certificate verification.
+ * Test-only: the e2e fixture origin uses a self-signed certificate. Never
+ * set `CRAWLER_INSECURE_TLS` in Compose's production `crawler` service or
+ * in CI's deployed environment. `insecureModeAllowed()` (`policy.ts`) is
+ * checked first and wins outright, via the same shared allow-list as
+ * `insecureTestHostnameAllowed`: `NODE_ENV` must be an explicit, known
+ * non-production value, not merely anything-but-"production" (fix round 2,
+ * P3). Extracted to a named, exported function — rather than inlined in the
+ * `newContext()` call below — specifically so a unit test can pin this gate
+ * directly, the way `tests/unit/crawler-policy.test.ts` already does for
+ * `insecureTestHostnameAllowed`; the failure mode this branch has hit twice
+ * is a fix whose test does not actually exercise the fixed code path.
+ */
+export function tlsVerificationDisabled(): boolean {
+  return insecureModeAllowed() && process.env.CRAWLER_INSECURE_TLS === "1";
+}
 
 const sessionBudgetMs = 60_000;
 const defaultMinGapMs = 2_000;
@@ -474,16 +493,7 @@ export async function withSession<T>(
       // allowlist, the blocked resource types, and the private-address
       // check below entirely. Blocking SW registration closes that hole.
       serviceWorkers: "block",
-      // Test-only: the e2e fixture origin uses a self-signed certificate.
-      // Never set CRAWLER_INSECURE_TLS in Compose's production `crawler`
-      // service or in CI's deployed environment. `NODE_ENV === "production"`
-      // is checked first and wins outright, for the same reason and in the
-      // same way as `insecureTestHostnameAllowed` in `policy.ts`: the env
-      // var alone is only undiscovered, not unreachable, because the
-      // service also keeps `env_file: .env.local`.
-      ignoreHTTPSErrors:
-        process.env.NODE_ENV !== "production" &&
-        process.env.CRAWLER_INSECURE_TLS === "1",
+      ignoreHTTPSErrors: tlsVerificationDisabled(),
     });
     // One DNS lookup per hostname for the life of this session, not one per
     // request: every subresource on a page shares its document's host, and
