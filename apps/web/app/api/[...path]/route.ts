@@ -1,3 +1,9 @@
+import {
+  listActivity,
+  retryCompany,
+  deleteCompany,
+  recordActivity,
+} from "@jobfinder/automation";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -45,6 +51,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 type Context = { params: Promise<{ path: string[] }> };
 async function handle(request: Request, context: Context) {
+  let activityUserId: string | null = null;
   try {
     const { path } = await context.params;
     const route = path.join("/");
@@ -66,7 +73,38 @@ async function handle(request: Request, context: Context) {
       return Response.json({ ok: true });
     }
     const user = await requireUser();
+    activityUserId = user.id;
     const db = getDb();
+    if (route === "activity" && method === "GET") {
+      const params = new URL(request.url).searchParams;
+      const before = params.get("before");
+      const candidateId = params.get("candidateId");
+      return Response.json(
+        await listActivity(db, user.id, {
+          before: before ? new Date(z.iso.datetime().parse(before)) : undefined,
+          candidateId: candidateId ? z.uuid().parse(candidateId) : undefined,
+        }),
+      );
+    }
+    if (path[0] === "companies" && path.length === 2) {
+      const id = z.uuid().parse(path[1]);
+      if (method === "POST") {
+        await rateLimit(`company-retry:${user.id}`, 30, 3600);
+        return Response.json(await retryCompany(db, user.id, id));
+      }
+      if (method === "DELETE")
+        return Response.json(await deleteCompany(db, user.id, id));
+    }
+    if (!["GET", "HEAD"].includes(method))
+      await recordActivity(db, {
+        userId: user.id,
+        actor: "Application",
+        stage: "request",
+        message: `${method} ${path
+          .filter((part) => !/^[a-f0-9-]{36}$/.test(part))
+          .join("/")
+          .slice(0, 100)} requested.`,
+      });
     if (route === "jobs/evaluation-batch" && method === "POST") {
       await rateLimit(`ai-batch:${user.id}`, 20, 3600);
       const result = await evaluateSyncedJobs(user.id, await readJson(request));
@@ -301,6 +339,15 @@ async function handle(request: Request, context: Context) {
     }
     throw new HttpError(404, "Endpoint not found.");
   } catch (error) {
+    if (activityUserId && !["GET", "HEAD"].includes(request.method))
+      await recordActivity(getDb(), {
+        userId: activityUserId,
+        actor: "Application",
+        stage: "request-failed",
+        level: "error",
+        message:
+          "The requested application action failed. See the error shown by the action or its scan details.",
+      }).catch(() => undefined);
     return errorResponse(error);
   }
 }

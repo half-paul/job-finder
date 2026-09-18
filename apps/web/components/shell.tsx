@@ -30,6 +30,7 @@ const nav = [
   ["/applications", "Applications", Layers3],
   ["/archived", "Archived", Archive],
   ["/discovery", "Discovery", Radar],
+  ["/companies", "Companies", BookmarkCheck],
   ["/watchlist", "Watchlist", BookmarkCheck],
   ["/automation", "Automation", Workflow],
   ["/profile", "Career profile", UserRound],

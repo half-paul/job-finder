@@ -5,12 +5,14 @@ export function salary(job: {
 }) {
   if (job.salaryMin === null && job.salaryMax === null)
     return "Salary not listed";
-  const fmt = (v: number) =>
-    new Intl.NumberFormat("en", {
-      style: "currency",
-      currency: job.currency,
-      maximumFractionDigits: 0,
-      notation: "compact",
-    }).format(v);
-  return `${job.salaryMin === null ? "Up to " : fmt(job.salaryMin)}${job.salaryMin !== null && job.salaryMax !== null ? " – " : ""}${job.salaryMax !== null ? fmt(job.salaryMax) : "+"} ${job.currency}`;
+  const currency = /^[a-z]{3}$/i.test(job.currency)
+    ? job.currency.toUpperCase()
+    : null;
+  const formatter = new Intl.NumberFormat("en", {
+    ...(currency ? { style: "currency", currency } : { style: "decimal" }),
+    maximumFractionDigits: 0,
+    notation: "compact",
+  });
+  const fmt = (value: number) => formatter.format(value);
+  return `${job.salaryMin === null ? "Up to " : fmt(job.salaryMin)}${job.salaryMin !== null && job.salaryMax !== null ? " – " : ""}${job.salaryMax !== null ? fmt(job.salaryMax) : "+"} ${currency ?? "(currency unknown)"}`;
 }

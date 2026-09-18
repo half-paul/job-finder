@@ -3,7 +3,10 @@ const config: NextConfig = {
   transpilePackages: [
     "@jobfinder/db",
     "@jobfinder/shared",
+    "@jobfinder/automation",
     "@jobfinder/matching",
+    "@jobfinder/discovery",
+    "@jobfinder/job-sources",
   ],
   serverExternalPackages: ["pg", "mammoth", "unpdf"],
   poweredByHeader: false,

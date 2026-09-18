@@ -1,16 +1,12 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Bookmark, Plus, Trash2 } from "lucide-react";
-import {
-  atsProviders,
-  scanSchedules,
-  watchlistPriorities,
-  type WatchlistPriority,
-} from "@jobfinder/shared";
+import { Bookmark, Trash2, RefreshCw } from "lucide-react";
+import { watchlistPriorities, type WatchlistPriority } from "@jobfinder/shared";
 import type { watchlist } from "../lib/automation";
 import { api } from "./client";
-import { Button } from "./ui/button";
+import { CompanyIntake } from "./company-intake";
+import { ActivityFeed } from "./activity-feed";
 
 type Entry = Awaited<ReturnType<typeof watchlist.list>>[number];
 
@@ -24,6 +20,8 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [scanningAll, setScanningAll] = useState(false);
+  const [scanningSource, setScanningSource] = useState<Set<string>>(new Set());
 
   async function run(
     key: string,
@@ -44,6 +42,41 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
     }
   }
 
+  async function handleScanSource(sourceId: string) {
+    setScanningSource((prev) => new Set(prev).add(sourceId));
+    try {
+      await api(`sources/${sourceId}`, "POST");
+      // Refresh to update the UI with latest scan results
+      router.refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setScanningSource((prev) => {
+        const next = new Set(prev);
+        next.delete(sourceId);
+        return next;
+      });
+    }
+  }
+
+  async function handleScanAll() {
+    const sourceIds = entries
+      .map((entry) => entry.source?.id)
+      .filter((id): id is string => id !== undefined);
+    if (sourceIds.length === 0) {
+      setError("No companies with direct scan available to scan.");
+      return;
+    }
+    setScanningAll(true);
+    try {
+      for (const sourceId of sourceIds) {
+        await handleScanSource(sourceId);
+      }
+    } finally {
+      setScanningAll(false);
+    }
+  }
+
   return (
     <>
       <div className="page-heading">
@@ -51,100 +84,12 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
           <span className="eyebrow">COMPANIES TO WATCH</span>
           <h1>Keep an eye on the employers that matter.</h1>
           <p>
-            Watchlist companies are checked on their own schedule. Add a
-            Greenhouse, Lever or Ashby board to scan that employer directly;
-            without a board, the entry stays a priority list you control.
+            Add a name and website, or import organizations in bulk. The worker
+            finds careers pages and chooses how to read their job listings.
           </p>
         </div>
       </div>
-      <section className="panel form-panel">
-        <div className="panel-heading">
-          <div>
-            <h2>Add a company</h2>
-            <p>
-              A board name is only needed when you want the worker to scan that
-              employer directly.
-            </p>
-          </div>
-        </div>
-        <form
-          className="form-grid"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const form = event.currentTarget;
-            const data = new FormData(form);
-            const provider = String(data.get("provider") ?? "");
-            void run(
-              "add",
-              () =>
-                api("watchlist", "POST", {
-                  company: data.get("company"),
-                  domain: data.get("domain"),
-                  provider: provider === "" ? null : provider,
-                  board: data.get("board"),
-                  priority: data.get("priority"),
-                  notes: data.get("notes"),
-                  schedule: data.get("schedule"),
-                }),
-              "Company added to your watchlist.",
-            ).then(() => form.reset());
-          }}
-        >
-          <label>
-            Company
-            <input name="company" required placeholder="e.g. Example SaaS" />
-          </label>
-          <label>
-            Domain (optional)
-            <input name="domain" placeholder="example.com" />
-          </label>
-          <label>
-            Priority
-            <select name="priority" defaultValue="Interesting">
-              {watchlistPriorities.map((priority) => (
-                <option key={priority}>{priority}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Direct scan provider (optional)
-            <select name="provider" defaultValue="">
-              <option value="">Track only, no direct scan</option>
-              {atsProviders.map((provider) => (
-                <option key={provider}>{provider}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Board name
-            <input name="board" placeholder="Board key or company slug" />
-            <small>
-              Required only for a direct scan. The worker runs it on the
-              schedule below.
-            </small>
-          </label>
-          <label>
-            Schedule
-            <select name="schedule" defaultValue="Every 4 hours">
-              {scanSchedules
-                .filter((s) => s !== "Manual")
-                .map((schedule) => (
-                  <option key={schedule}>{schedule}</option>
-                ))}
-            </select>
-          </label>
-          <label>
-            Notes
-            <input name="notes" placeholder="Why this company matters" />
-          </label>
-          <div className="form-actions">
-            <Button disabled={busy === "add"}>
-              <Plus size={17} />
-              {busy === "add" ? "Adding…" : "Add company"}
-            </Button>
-          </div>
-        </form>
-      </section>
+      <CompanyIntake onImported={() => router.refresh()} />
       {error && (
         <p className="error" role="alert">
           {error}
@@ -163,6 +108,15 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
               {entries.length} {entries.length === 1 ? "company" : "companies"}.
               Remove an entry to stop scanning it directly.
             </p>
+            {entries.length > 0 && (
+              <button
+                className="button-secondary"
+                onClick={handleScanAll}
+                disabled={scanningAll}
+              >
+                {scanningAll ? "Scanning all…" : "Scan all"}
+              </button>
+            )}
           </div>
         </div>
         {entries.length ? (
@@ -237,6 +191,27 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
                       <button
                         type="button"
                         className="icon-button"
+                        aria-label={`Scan ${entry.company} now`}
+                        disabled={
+                          !entry.source ||
+                          busy === entry.id ||
+                          scanningSource.has(entry.source?.id ?? "")
+                        }
+                        onClick={() => {
+                          if (entry.source?.id) {
+                            handleScanSource(entry.source.id);
+                          }
+                        }}
+                      >
+                        <RefreshCw size={16} />
+                        {busy === entry.id ||
+                        scanningSource.has(entry.source?.id ?? "")
+                          ? "Scanning…"
+                          : "Scan"}
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-button"
                         aria-label={`Remove ${entry.company} from your watchlist`}
                         disabled={busy === entry.id}
                         onClick={() =>
@@ -262,12 +237,13 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
             </span>
             <h3>No companies yet</h3>
             <p>
-              Add the employers you would want to hear from first. A watchlist
-              entry with a board key is scanned on your schedule.
+              Add the employers you would want to hear from first. Website and
+              careers discovery run automatically.
             </p>
           </div>
         )}
       </section>
+      <ActivityFeed />
     </>
   );
 }

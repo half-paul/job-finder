@@ -1,9 +1,10 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Activity, CalendarClock, Play } from "lucide-react";
 import { scanSchedules, type ScanSchedule } from "@jobfinder/shared";
 import type { automation } from "../lib/automation";
+import { ActivityFeed } from "./activity-feed";
 import { api } from "./client";
 import { Button } from "./ui/button";
 
@@ -20,6 +21,10 @@ const when = (value: Date | string | null | undefined) =>
  */
 export function AutomationBoard({ overview }: { overview: Overview }) {
   const router = useRouter();
+  useEffect(() => {
+    const timer = setInterval(() => router.refresh(), 5000);
+    return () => clearInterval(timer);
+  }, [router]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -62,6 +67,7 @@ export function AutomationBoard({ overview }: { overview: Overview }) {
           </p>
         </div>
       </div>
+      <ActivityFeed />
       <div className="stats-grid">
         <div className="stat-card">
           <div>

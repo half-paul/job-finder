@@ -1424,3 +1424,18 @@ legend {
     line-height: 1.6;
   }
 }
+
+.activity-log {
+  max-height: 32rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.activity-log .timeline li {
+  padding: 0.65rem 0;
+}
+.company-tabs {
+  margin-bottom: 1.25rem;
+}
+.form-grid .full-width {
+  grid-column: 1 / -1;
+}
