@@ -1,7 +1,7 @@
 import { CrawlerFailure } from "./failure";
 
-// Signature accepts the parsed request so index.ts's call site typechecks;
-// Task 9 replaces this file wholesale with the real implementation.
-export async function runCapture(_request: unknown): Promise<never> {
+// Real signature so Task 9 inherits the right contract instead of re-deriving
+// it; this file is still replaced wholesale.
+export async function runCapture(input: { url: string }): Promise<never> {
   throw new CrawlerFailure("Capture is not implemented yet", "internal");
 }

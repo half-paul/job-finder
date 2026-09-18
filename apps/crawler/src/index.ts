@@ -11,7 +11,11 @@ const port = Number(process.env.PORT ?? 4000);
 const secret = process.env.CRAWLER_SECRET?.trim();
 if (!secret) throw new Error("CRAWLER_SECRET is required. See README.md.");
 
-function log(level: "info" | "error", event: string, detail: object = {}) {
+function log(
+  level: "info" | "warn" | "error",
+  event: string,
+  detail: object = {},
+) {
   const line = JSON.stringify({
     ts: new Date().toISOString(),
     level,
@@ -50,8 +54,20 @@ const server = createServer(async (req, res) => {
     res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(payload));
   };
-  const fail = (status: number, error: string, kind: CrawlerError["kind"]) =>
+  const fail = (status: number, error: string, kind: CrawlerError["kind"]) => {
+    // This service is reachable on the Compose network and runs untrusted pages,
+    // so a rejected request must leave a trace — an unlogged 401 is an invisible probe.
+    // Never log the authorization header or body: a rejected credential logged is
+    // worse than not logging at all.
+    log("warn", "crawler.request_refused", {
+      url: req.url,
+      method: req.method,
+      status,
+      kind,
+      error,
+    });
     send(status, { error, kind });
+  };
 
   try {
     if (req.method !== "POST") return fail(405, "Use POST", "internal");
@@ -82,10 +98,11 @@ const server = createServer(async (req, res) => {
     }
     return fail(404, "Unknown endpoint", "internal");
   } catch (error) {
+    // fail() logs this refusal too, so there is exactly one log line per
+    // rejected request whether it returned early or was thrown.
     const kind: CrawlerError["kind"] =
       error instanceof CrawlerFailure ? error.kind : "internal";
     const message = error instanceof Error ? error.message : "Crawler failed";
-    log("error", "crawler.request_failed", { url: req.url, message, kind });
     return fail(kind === "internal" ? 500 : 422, message, kind);
   }
 });
