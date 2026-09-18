@@ -81,7 +81,11 @@ describe("Phase 5 seed list parser", () => {
     );
     expect(parsed.rows).toEqual([
       { name: "Acme", domain: "acme.com" },
-      { name: "beta.io", domain: "beta.io" },
+      {
+        name: "beta.io",
+        domain: "beta.io",
+        websiteUrl: "https://www.beta.io/about?x=1",
+      },
       { name: "gamma.co.uk", domain: "gamma.co.uk" },
     ]);
     expect(parsed.rejected).toEqual([{ line: 5, reason: "No domain found" }]);

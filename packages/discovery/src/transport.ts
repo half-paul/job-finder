@@ -15,9 +15,8 @@ export const discoveryUserAgent = "JobFinderBot/1.0";
 const maxRedirects = 3;
 
 /**
- * One robots.txt fetch per host per resolver run. A missing, failing or
- * unreadable file allows everything, which matches how crawlers treat 404s;
- * a reachable file is honoured exactly.
+ * One robots.txt fetch per host per resolver run. Only 404/410 are treated
+ * as missing; unavailable policy checks stop discovery rather than allowing it.
  */
 export class RobotsCache {
   private readonly rules = new Map<string, Promise<RobotsRules>>();
@@ -27,16 +26,32 @@ export class RobotsCache {
     let pending = this.rules.get(host);
     if (!pending) {
       pending = (async () => {
-        try {
+        let url = new URL(`https://${host}/robots.txt`);
+        for (let hop = 0; hop <= maxRedirects; hop++) {
           const { response, text } = await fetchText(
-            new URL(`https://${host}/robots.txt`),
+            url,
             { Accept: "text/plain" },
             { ...this.options, maxBytes: 512 * 1024 },
           );
-          return response.ok ? parseRobots(text) : parseRobots("");
-        } catch {
-          return parseRobots("");
+          if (response.ok) return parseRobots(text);
+          if ([404, 410].includes(response.status)) return parseRobots("");
+          const location = response.headers.get("location");
+          if (
+            response.status >= 300 &&
+            response.status < 400 &&
+            location &&
+            hop < maxRedirects
+          ) {
+            url = new URL(location, url);
+            continue;
+          }
+          if ([401, 403].includes(response.status))
+            throw new RobotsBlockedError(url.href, `HTTP ${response.status}`);
+          throw new Error(
+            `Cannot verify robots.txt for ${host}: HTTP ${response.status}.`,
+          );
         }
+        throw new Error("Too many robots.txt redirects.");
       })();
       this.rules.set(host, pending);
     }
@@ -82,14 +97,27 @@ export interface DiscoveryFetchResult {
  */
 export async function discoveryFetch(
   url: URL,
-  options: TransportOptions & { robots: RobotsCache },
+  options: TransportOptions & {
+    robots: RobotsCache;
+    onProgress?: (stage: string, message: string) => Promise<void>;
+    allowUrl?: (url: URL) => boolean;
+  },
 ): Promise<DiscoveryFetchResult> {
-  const { robots, ...transport } = options;
+  const { robots, onProgress, allowUrl, ...transport } = options;
   let current = new URL(url.href);
   const chain: string[] = [];
   for (let hop = 0; hop <= maxRedirects; hop++) {
     assertHttpsUrl(current);
+    if (allowUrl && !allowUrl(current))
+      throw new Error(
+        "Careers navigation left the approved company or ATS hosts.",
+      );
+    await onProgress?.("robots", `Checking robots.txt for ${current.hostname}`);
     await robots.assertAllowed(current);
+    await onProgress?.(
+      "fetch",
+      `Fetching ${current.origin}${current.pathname}`,
+    );
     chain.push(current.href);
     const { response, text } = await fetchText(
       current,
@@ -98,6 +126,10 @@ export async function discoveryFetch(
           "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.5",
       },
       transport,
+    );
+    await onProgress?.(
+      "http",
+      `HTTP ${response.status} from ${current.hostname}`,
     );
     const location = response.headers.get("location");
     if (response.status >= 300 && response.status < 400 && location) {

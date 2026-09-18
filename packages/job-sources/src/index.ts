@@ -14,6 +14,7 @@ import {
 } from "./crawler-client";
 
 export * from "./transport";
+export type { CrawlerClient } from "./crawler-client";
 
 export type SourceProvider =
   | "Greenhouse"

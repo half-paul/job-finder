@@ -1,8 +1,10 @@
 import { isIP } from "node:net";
+import { assertHttpsUrl } from "@jobfinder/job-sources";
 
 export interface SeedRow {
   name: string;
   domain: string;
+  websiteUrl?: string;
 }
 
 export interface SeedListResult {
@@ -52,14 +54,18 @@ export function registrableDomain(host: string): string | null {
   return labels.slice(-keep).join(".");
 }
 
-function domainFromToken(token: string): string | null {
+export function websiteFromToken(token: string): string | null {
   const value = token.trim().replace(/^["']|["']$/g, "");
   if (!value) return null;
   try {
     const url = new URL(
       /^[a-z]+:\/\//i.test(value) ? value : `https://${value}`,
     );
-    return registrableDomain(url.hostname);
+    if (url.protocol === "http:") url.protocol = "https:";
+    assertHttpsUrl(url);
+    if (!registrableDomain(url.hostname)) return null;
+    url.hash = "";
+    return url.href;
   } catch {
     return null;
   }
@@ -99,29 +105,38 @@ export function parseSeedList(text: string): SeedListResult {
   const lines = text.split(/\r?\n/);
   let nameIndex = 0;
   let domainIndex = -1;
+  let first = true;
   lines.forEach((raw, offset) => {
     const line = offset + 1;
     if (!raw.trim()) return;
-    const fields = splitCsvLine(raw);
+    const fields = splitCsvLine(raw.replace(/^\uFEFF/, "").replace(/\t/g, ","));
     if (
-      offset === 0 &&
-      fields.length >= 2 &&
+      first &&
+      fields.length >= 1 &&
       fields.every((f) => headerPattern.test(f))
     ) {
+      first = false;
       nameIndex = fields.findIndex((f) => /^(company|name)$/i.test(f));
       domainIndex = fields.findIndex((f) => /^(website|domain|url)$/i.test(f));
       return;
     }
+    first = false;
+    let websiteUrl: string | null = null;
     let name = "";
     let domain: string | null = null;
     if (domainIndex >= 0) {
-      domain = domainFromToken(fields[domainIndex] ?? "");
+      websiteUrl = websiteFromToken(fields[domainIndex] ?? "");
+      domain = websiteUrl
+        ? new URL(websiteUrl).hostname.replace(/^www\./, "")
+        : null;
       name = fields[nameIndex] ?? "";
     } else {
       for (const field of fields) {
-        const candidate = domainFromToken(field);
-        if (candidate && !domain) domain = candidate;
-        else if (!name && field && !candidate) name = field;
+        const candidate = websiteFromToken(field);
+        if (candidate && !domain) {
+          websiteUrl = candidate;
+          domain = new URL(candidate).hostname.replace(/^www\./, "");
+        } else if (!name && field && !candidate) name = field;
       }
     }
     if (!domain) {
@@ -136,10 +151,17 @@ export function parseSeedList(text: string): SeedListResult {
       rejected.push({ line, reason: `Import limit is ${seedListLimit} rows` });
       return;
     }
+    if (name.length > fieldLimit || domain.length > fieldLimit) {
+      rejected.push({ line, reason: "Company name or domain is too long" });
+      return;
+    }
     seen.add(domain);
     rows.push({
       name: (name || domain).slice(0, fieldLimit),
-      domain: domain.slice(0, fieldLimit),
+      domain,
+      ...(websiteUrl && websiteUrl !== `https://${domain}/`
+        ? { websiteUrl }
+        : {}),
     });
   });
   return { rows, rejected };

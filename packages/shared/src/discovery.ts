@@ -19,6 +19,7 @@ export const crawlStrategies = [
   "json-ld",
   "captured-api",
   "browser",
+  "ai",
 ] as const;
 export type CrawlStrategy = (typeof crawlStrategies)[number];
 
@@ -63,6 +64,7 @@ export const strategyLabel: Record<CrawlStrategy, string> = {
   "json-ld": "Reading careers page",
   "captured-api": "Replaying saved API",
   browser: "Browser crawl",
+  ai: "AI careers extraction",
 };
 
 export const companyImportSchema = z.object({

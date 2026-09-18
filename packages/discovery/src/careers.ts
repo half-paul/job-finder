@@ -90,7 +90,10 @@ export function scoreCareersLinks(html: string, base: URL, domain: string) {
 
 async function tryFetch(
   url: URL,
-  options: TransportOptions & { robots: RobotsCache },
+  options: TransportOptions & {
+    robots: RobotsCache;
+    onProgress?: (stage: string, message: string) => Promise<void>;
+  },
 ): Promise<DiscoveryFetchResult | null> {
   try {
     const result = await discoveryFetch(url, options);
@@ -108,15 +111,18 @@ async function tryFetch(
  */
 export async function findCareersPage(
   domain: string,
-  options: TransportOptions & { robots: RobotsCache },
+  options: TransportOptions & {
+    robots: RobotsCache;
+    onProgress?: (stage: string, message: string) => Promise<void>;
+  },
 ): Promise<DiscoveryFetchResult | null> {
   const home =
     (await tryFetch(new URL(`https://${domain}/`), options)) ??
     (await tryFetch(new URL(`https://www.${domain}/`), options));
   const base = home?.finalUrl ?? new URL(`https://${domain}/`);
   if (home) {
-    const [best] = scoreCareersLinks(home.text, home.finalUrl, domain);
-    if (best) {
+    const links = scoreCareersLinks(home.text, home.finalUrl, domain);
+    for (const best of links.slice(0, 5)) {
       const page = await tryFetch(best.url, options);
       if (page) return page;
     }
