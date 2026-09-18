@@ -1,6 +1,7 @@
 // tests/unit/discovery-connectors.test.ts
 import { describe, expect, it } from "vitest";
 import {
+  capturedApiMaxJobs,
   createConnector,
   extractJsonLdJobs,
   normalizeJsonLdJob,
@@ -443,5 +444,38 @@ describe("CapturedApi connector", () => {
     await expect(
       connector.search({ board: "acme", terms: [], company: "Acme" }),
     ).rejects.toThrow(/no parseable posting/i);
+  });
+
+  it("treats hitting the job cap on an exact page boundary as incomplete", async () => {
+    // The bug: when the last usable posting of a page brings jobs.length to
+    // exactly maxJobs, the inner per-entry cap check never fires (it only
+    // triggers on a *leftover* entry after the cap), and the outer loop just
+    // stops because `jobs.length < maxJobs` goes false — without `page` ever
+    // exceeding maxPages either. Both existing "incomplete" guards can miss
+    // this exact boundary, so `complete` (and `canMarkRemovals`) must be
+    // computed against the job count directly.
+    const perPage = 100;
+    const fullPages = capturedApiMaxJobs / perPage;
+    const pages: Record<string, unknown[]> = {};
+    let id = 1;
+    for (let p = 1; p <= fullPages; p++) {
+      pages[String(p)] = Array.from({ length: perPage }, () =>
+        capturedPosting(id++),
+      );
+    }
+    // One more page proves postings exist beyond the cap.
+    pages[String(fullPages + 1)] = [capturedPosting(id)];
+    const connector = createConnector(
+      "CapturedApi",
+      options({ fetchImpl: pagedFetch(pages) }),
+    );
+    const page = await connector.search({
+      board: "acme",
+      terms: [],
+      company: "Acme",
+    });
+    expect(page.jobs).toHaveLength(capturedApiMaxJobs);
+    expect(page.complete).toBe(false);
+    expect(page.canMarkRemovals).toBe(false);
   });
 });

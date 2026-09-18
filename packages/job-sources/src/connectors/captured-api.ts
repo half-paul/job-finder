@@ -15,7 +15,9 @@ import {
 } from "../index";
 
 const maxPages = 20;
-const maxJobs = 500;
+// Exported so tests can build an exact-boundary fixture from the real
+// constant instead of hardcoding a postings count that could silently drift.
+export const maxJobs = 500;
 
 const readString = (
   raw: Record<string, unknown>,
@@ -127,6 +129,10 @@ export function createCapturedApiConnector(
           break;
       }
       if (page > maxPages) complete = false;
+      // Reaching the job cap can never prove a complete inventory, so removals must
+      // stay off — `canMarkRemovals` follows `complete`, and a truncated view that
+      // claims completeness makes the caller delete postings it simply never read.
+      if (jobs.length >= maxJobs) complete = false;
       if (!parsedAny)
         throw new Error("Saved API replay returned no parseable posting");
       return { jobs, complete, canMarkRemovals: complete, notModified: false };
