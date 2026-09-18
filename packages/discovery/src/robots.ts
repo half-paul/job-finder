@@ -47,15 +47,33 @@ export function parseRobots(text: string): RobotsRules {
   return { groups };
 }
 
+/**
+ * Rule paths come from the crawled site's robots.txt and the tested path from
+ * that same site's links, so this is matched with a linear scan instead of a
+ * compiled regex. Joining `*` segments with `.*` made a wildcard-heavy rule
+ * backtrack catastrophically, and because matching is synchronous it hung the
+ * worker's event loop where no fetch timeout or job signal could reach it.
+ */
 function ruleMatches(rulePath: string, path: string): boolean {
-  const pattern = rulePath
-    .split("*")
-    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-    .join(".*");
-  const anchored = pattern.endsWith("\\$")
-    ? `^${pattern.slice(0, -2)}$`
-    : `^${pattern}`;
-  return new RegExp(anchored).test(path);
+  const anchoredEnd = rulePath.endsWith("$");
+  const pattern = anchoredEnd ? rulePath.slice(0, -1) : rulePath;
+  const segments = pattern.split("*");
+  const first = segments[0];
+  if (!path.startsWith(first)) return false;
+  if (segments.length === 1) return anchoredEnd ? path === first : true;
+  let index = first.length;
+  for (let i = 1; i < segments.length - 1; i++) {
+    const segment = segments[i];
+    if (!segment) continue;
+    const found = path.indexOf(segment, index);
+    if (found === -1) return false;
+    index = found + segment.length;
+  }
+  const last = segments[segments.length - 1];
+  if (!last) return true;
+  if (anchoredEnd)
+    return path.length - last.length >= index && path.endsWith(last);
+  return path.indexOf(last, index) !== -1;
 }
 
 /**

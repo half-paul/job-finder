@@ -214,6 +214,9 @@ export async function runHousekeeping(
 }
 
 /** Candidate claims and final writes are fenced by attempt number, including after a worker restart. */
+/** Refresh cadence for a source discovery created; the activity copy reads it. */
+const resolvedSourceSchedule = "Every 4 hours" as const;
+
 export async function runResolveCompanyJob(
   db: AutomationDb,
   job: { data: { userId: string; candidateId: string } },
@@ -263,7 +266,7 @@ export async function runResolveCompanyJob(
           board: resolution.board,
         }),
         enabled: true,
-        schedule: "Every 4 hours",
+        schedule: resolvedSourceSchedule,
         nextRunAt: new Date(),
       };
       const [source] = await tx
@@ -271,9 +274,25 @@ export async function runResolveCompanyJob(
         .values(values)
         .onConflictDoUpdate({
           target: [jobSources.ownerId, jobSources.identity],
-          set: values,
+          // An existing row can belong to a watchlist entry or another
+          // candidate that resolved to the same board. Discovery may refresh
+          // where the source points, but never the choices its owner made:
+          // schedule, enabled and the company label stay as they were.
+          set: {
+            provider: values.provider,
+            board: values.board,
+            sourceUrl: values.sourceUrl,
+          },
         })
         .returning();
+      if (candidate.sourceId === source.id && !source.enabled)
+        // Our own source was parked by an earlier failure; a successful
+        // re-resolution revives it. A source owned by a watchlist entry or
+        // another candidate is left exactly as its owner configured it.
+        await tx
+          .update(jobSources)
+          .set({ enabled: true, nextRunAt: new Date() })
+          .where(eq(jobSources.id, source.id));
       if (candidate.sourceId && candidate.sourceId !== source.id)
         await tx
           .update(jobSources)
@@ -320,7 +339,7 @@ export async function runResolveCompanyJob(
         sourceId: source.id,
         actor: "Worker",
         stage: "resolved",
-        message: `${candidate.name}: careers source ready. First scan is due now; refreshes run every 4 hours.`,
+        message: `${candidate.name}: careers source ready. First scan is due now; refreshes run ${resolvedSourceSchedule.toLowerCase()}.`,
       });
     });
     return { resolved: true };
@@ -343,6 +362,18 @@ export async function runResolveCompanyJob(
         ),
       )
       .returning();
+    if (failed?.sourceId)
+      // Leaving the source enabled would retry on the 4-hour schedule forever
+      // and fail the approval gate every time. Park it until the next retry.
+      await db
+        .update(jobSources)
+        .set({ enabled: false, nextRunAt: null })
+        .where(
+          and(
+            eq(jobSources.id, failed.sourceId),
+            eq(jobSources.ownerId, userId),
+          ),
+        );
     if (failed)
       await recordActivity(db, {
         userId,

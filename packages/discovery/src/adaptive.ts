@@ -71,9 +71,20 @@ export function createAdaptiveCareersConnector(
               jobCapReached = true;
               break;
             }
-            assertHttpsUrl(new URL(job.url));
-            if (allowed(new URL(job.url)))
-              cache.set(jsonLdExternalId(job), job);
+            // jsonLdJobSchema accepts any string as a url and real careers
+            // pages publish relative ones, so resolve against the page and
+            // skip what stays invalid. One bad posting must not abort a scan
+            // that search() runs outside the caller's per-listing try/catch.
+            let jobUrl: URL;
+            try {
+              jobUrl = new URL(job.url, page.finalUrl);
+              assertHttpsUrl(jobUrl);
+            } catch {
+              continue;
+            }
+            if (!allowed(jobUrl)) continue;
+            const resolved = { ...job, url: jobUrl.href };
+            cache.set(jsonLdExternalId(resolved), resolved);
           }
           nextUrls = evidence.links
             .filter((link) =>

@@ -4,7 +4,7 @@ import {
 } from "@jobfinder/discovery";
 import { recordActivities, recordActivity } from "./activity";
 import { discoveryExtractor } from "./discovery-ai";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   getPool,
@@ -201,7 +201,14 @@ export async function scanSourceWithDb(
           and(
             eq(companyCandidates.userId, userId),
             eq(companyCandidates.sourceId, sourceId),
-            eq(companyCandidates.status, "Resolved"),
+            // A re-resolution in flight leaves the candidate Pending or
+            // Resolving. The approval it already earned still stands, so the
+            // scheduled scan must not fail for the duration of the retry.
+            inArray(companyCandidates.status, [
+              "Resolved",
+              "Pending",
+              "Resolving",
+            ]),
           ),
         );
       if (!approved?.policyCheck?.robotsAllowed)

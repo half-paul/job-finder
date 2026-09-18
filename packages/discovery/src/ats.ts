@@ -1,5 +1,5 @@
 import type { DetectableAts } from "@jobfinder/shared";
-import { extractAnchors } from "./careers";
+import { careersSignal, extractAnchors } from "./careers";
 
 export interface AtsDetection {
   ats: DetectableAts;
@@ -88,8 +88,17 @@ function candidateUrls(input: {
       // ignore
     }
   }
-  for (const anchor of extractAnchors(input.html, input.finalUrl))
-    urls.push(anchor.href);
+  for (const anchor of extractAnchors(input.html, input.finalUrl)) {
+    // A bare anchor to an ATS host proves nothing about who owns that board:
+    // one partner, investor or blog link in a footer would otherwise make
+    // another company's listings this candidate's source. Only a link that
+    // presents itself as this site's careers link corroborates a detection.
+    if (
+      careersSignal.test(anchor.text) ||
+      careersSignal.test(anchor.href.pathname)
+    )
+      urls.push(anchor.href);
+  }
   return urls;
 }
 

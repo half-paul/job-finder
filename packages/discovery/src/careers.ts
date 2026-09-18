@@ -33,6 +33,14 @@ const strongTerms = [
   "employment",
 ];
 
+/**
+ * Whether a link presents itself as this site's careers link. Used to decide
+ * if a bare anchor may corroborate an ATS detection, where a footer or
+ * partner link to another company's board otherwise would.
+ */
+export const careersSignal =
+  /career|job|hiring|open|role|position|vacanc|recruit|apply|talent|join|employment/i;
+
 export function extractAnchors(html: string, base: URL) {
   const anchors: { href: URL; text: string }[] = [];
   const pattern = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;

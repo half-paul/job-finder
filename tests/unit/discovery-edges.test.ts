@@ -132,6 +132,26 @@ describe("adaptive careers connector limits", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("skips a malformed structured url instead of failing the whole scan", async () => {
+    // jsonLdJobSchema declares url as a bare string, so a relative or blank
+    // url used to throw out of search() and import zero jobs from the site.
+    const page =
+      ldScript({ identifier: "REQ-1" }) +
+      ldScript({ identifier: "REQ-REL", url: "/jobs/relative" }) +
+      ldScript({ identifier: "REQ-BAD", url: "javascript:alert(1)" }) +
+      ldScript({ identifier: "REQ-HTTP", url: "http://acme.example/jobs/2" });
+    const connector = createAdaptiveCareersConnector({
+      extractPage: vi.fn(),
+      fetchImpl: fixtureFetch({ "https://acme.example/careers": page }),
+    });
+    const result = await connector.search(query);
+    const ids = result.jobs.map((job) => job.externalId);
+    expect(ids).toContain("REQ-1");
+    expect(ids).toContain("REQ-REL");
+    expect(ids).not.toContain("REQ-BAD");
+    expect(ids).not.toContain("REQ-HTTP");
+  });
+
   it("stops at the hundred-listing cap and reports the walk incomplete", async () => {
     const jobs = Array.from({ length: 120 }, (_, index) =>
       ldScript({
@@ -204,6 +224,57 @@ describe("adaptive careers connector limits", () => {
     await expect(
       connector.fetchJob({ externalId: "REQ-missing", url: "" }),
     ).rejects.toThrow("missing from this scan");
+  });
+});
+
+describe("ATS detection corroboration", () => {
+  it("ignores a bare partner link to another company's board", async () => {
+    const { detectAts } = await import("@jobfinder/discovery");
+    const html =
+      '<a href="https://boards.greenhouse.io/partnerco">PartnerCo</a>';
+    expect(
+      detectAts({
+        finalUrl: new URL("https://acme.example/"),
+        chain: [],
+        html,
+      }),
+    ).toBeNull();
+  });
+
+  it("still detects a board behind a link that reads as careers", async () => {
+    const { detectAts } = await import("@jobfinder/discovery");
+    const html = '<a href="https://jobs.lever.co/acme">Open roles</a>';
+    expect(
+      detectAts({
+        finalUrl: new URL("https://acme.example/"),
+        chain: [],
+        html,
+      }),
+    ).toMatchObject({ ats: "Lever", key: "acme" });
+  });
+});
+
+describe("hostile robots rules", () => {
+  it("matches a wildcard-heavy rule in bounded time", () => {
+    // A site serving this rule used to hang the matcher indefinitely, and
+    // because matching is synchronous it froze the whole worker.
+    const rules = parseRobots(
+      `User-agent: *\nDisallow: /${"a*".repeat(24)}b\n`,
+    );
+    const start = Date.now();
+    robotsAllows(rules, `/${"a".repeat(60)}`, "JobFinderBot");
+    expect(Date.now() - start).toBeLessThan(100);
+  });
+
+  it("keeps wildcard and end-anchor semantics", () => {
+    const rules = parseRobots(
+      "User-agent: *\nDisallow: /a*/c\nDisallow: /x.pdf$\n",
+    );
+    expect(robotsAllows(rules, "/abbb/c", "JobFinderBot").allowed).toBe(false);
+    expect(robotsAllows(rules, "/x.pdf", "JobFinderBot").allowed).toBe(false);
+    expect(robotsAllows(rules, "/x.pdf?a=1", "JobFinderBot").allowed).toBe(
+      true,
+    );
   });
 });
 
