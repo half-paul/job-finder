@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { activityPageLimit } from "@jobfinder/shared";
 import { api } from "./client";
 import { Button } from "./ui/button";
 
@@ -18,7 +19,14 @@ export function ActivityFeed({ candidateId }: { candidateId?: string }) {
   const [paused, setPaused] = useState(false);
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(false);
-  const path = `activity${candidateId ? `?candidateId=${encodeURIComponent(candidateId)}` : ""}`;
+  const activityPath = (beforeId?: string) => {
+    const params = new URLSearchParams();
+    if (candidateId) params.set("candidateId", candidateId);
+    if (beforeId) params.set("beforeId", beforeId);
+    const query = params.toString();
+    return `activity${query ? `?${query}` : ""}`;
+  };
+  const path = activityPath();
   // Loading older history must not restart the poll, so its length is read
   // through a ref instead of becoming an effect dependency.
   const olderCount = useRef(0);
@@ -42,7 +50,8 @@ export function ActivityFeed({ candidateId }: { candidateId?: string }) {
         if (active) {
           setEvents(result);
           setError("");
-          if (!olderCount.current) setHasMore(result.length === 100);
+          if (!olderCount.current)
+            setHasMore(result.length === activityPageLimit);
         }
       } catch (error) {
         failures++;
@@ -125,11 +134,13 @@ export function ActivityFeed({ candidateId }: { candidateId?: string }) {
             setLoading(true);
             try {
               const last = all.at(-1);
-              const result = await api<Activity[]>(
-                `${path}${candidateId ? "&" : "?"}before=${encodeURIComponent(last!.createdAt)}`,
-              );
-              setOlder([...all, ...result]);
-              setHasMore(result.length === 100);
+              if (!last) return;
+              // The cursor is the last row's id: the server reads the exact
+              // boundary back from it, so rows sharing a timestamp are not
+              // skipped and no precision is lost in the round trip.
+              const result = await api<Activity[]>(activityPath(last.id));
+              setOlder([...older, ...result]);
+              setHasMore(result.length === activityPageLimit);
             } catch (error) {
               setError((error as Error).message);
             } finally {

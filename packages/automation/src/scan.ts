@@ -175,8 +175,10 @@ export async function scanSourceWithDb(
   });
   const progress = (stage: string, message: string) =>
     recordActivity(db, event(stage, message));
-  // Per-listing progress is buffered and written in batches: a 5000-job scan
-  // must not pay one INSERT round trip per listing.
+  // Only warnings are written per listing now, still buffered: an import that
+  // logged every listing made activity_events the largest table in the
+  // database and the slowest read on the feed's two-second poll. Counts for
+  // added, updated and filtered listings live on the run summary instead.
   const buffered: ReturnType<typeof event>[] = [];
   const flushProgress = async () => {
     if (!buffered.length) return;
@@ -289,10 +291,6 @@ export async function scanSourceWithDb(
             // Previously imported listings therefore stay untouched.
             if (!keywordFilter(normalized, settings).passed) {
               filtered++;
-              await bufferProgress(
-                "filter",
-                `${normalized.title}: skipped by keyword filters.`,
-              );
               continue;
             }
             const result = await upsertDiscoveredJob(
@@ -303,7 +301,7 @@ export async function scanSourceWithDb(
             );
             if (result === "added") added++;
             if (result === "updated") updated++;
-            await bufferProgress("import", `${normalized.title}: ${result}.`);
+            // Counted in the run summary rather than written per listing.
           } catch (error) {
             const warning = `${reference.externalId}: ${
               error instanceof Error ? error.message : "could not read posting"

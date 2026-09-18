@@ -451,6 +451,9 @@ export const activityEvents = pgTable(
   },
   (t) => [
     index("activity_owner_created_idx").on(t.userId, t.createdAt),
+    // user_id leads the index above, so a predicate on created_at alone (the
+    // retention sweep) cannot use it and would scan the whole table.
+    index("activity_created_idx").on(t.createdAt),
     // Both foreign keys cascade on delete: without these a company or source
     // removal scans the whole table to find the rows it has to delete.
     index("activity_candidate_idx").on(t.candidateId),

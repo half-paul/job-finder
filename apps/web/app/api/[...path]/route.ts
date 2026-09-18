@@ -77,11 +77,11 @@ async function handle(request: Request, context: Context) {
     const db = getDb();
     if (route === "activity" && method === "GET") {
       const params = new URL(request.url).searchParams;
-      const before = params.get("before");
+      const beforeId = params.get("beforeId");
       const candidateId = params.get("candidateId");
       return Response.json(
         await listActivity(db, user.id, {
-          before: before ? new Date(z.iso.datetime().parse(before)) : undefined,
+          beforeId: beforeId ? z.uuid().parse(beforeId) : undefined,
           candidateId: candidateId ? z.uuid().parse(candidateId) : undefined,
         }),
       );

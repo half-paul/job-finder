@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+/** Page size for the activity feed; the client reads it to offer "load older". */
+export const activityPageLimit = 100;
+
 /** Where an imported company sits in the resolution ladder. */
 export const candidateStatuses = [
   "Pending",

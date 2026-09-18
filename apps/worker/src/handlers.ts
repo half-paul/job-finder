@@ -182,6 +182,7 @@ export interface HousekeepingResult {
   removedSessions: number;
   removedRateLimits: number;
   removedNotifications: number;
+  removedActivity: number;
   digests: number;
 }
 
@@ -209,14 +210,15 @@ export async function runHousekeeping(
     removedSessions: cleaned.sessions,
     removedRateLimits: cleaned.rateLimits,
     removedNotifications: cleaned.notifications,
+    removedActivity: cleaned.activity,
     digests,
   };
 }
 
-/** Candidate claims and final writes are fenced by attempt number, including after a worker restart. */
 /** Refresh cadence for a source discovery created; the activity copy reads it. */
 const resolvedSourceSchedule = "Every 4 hours" as const;
 
+/** Candidate claims and final writes are fenced by attempt number, including after a worker restart. */
 export async function runResolveCompanyJob(
   db: AutomationDb,
   job: { data: { userId: string; candidateId: string } },

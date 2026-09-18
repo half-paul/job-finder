@@ -40,6 +40,7 @@ import {
   deleteWatchlist,
   importCompanies,
   listActivity,
+  recordActivities,
   listCompanies,
   pendingCompanies,
   scanSourceWithDb,
@@ -87,6 +88,40 @@ const fixtureFetch = (async (input: RequestInfo | URL) => {
     );
   return new Response("missing", { status: 404 });
 }) as typeof fetch;
+
+test("activity paging does not skip rows written in one batch", async ({
+  request,
+}) => {
+  const pool = new Pool({ connectionString: databaseUrl });
+  const user = await register(request);
+  try {
+    // One insert gives every row the same created_at, which is exactly what a
+    // bulk import produces. A created_at-only cursor dropped the rest of the
+    // batch at the page boundary.
+    await recordActivities(
+      getDb(),
+      Array.from({ length: 150 }, (_, index) => ({
+        userId: user.id,
+        actor: "Application" as const,
+        stage: "queued",
+        message: `batched row ${index}`,
+      })),
+    );
+    const first = await listActivity(getDb(), user.id);
+    expect(first).toHaveLength(100);
+    const older = await listActivity(getDb(), user.id, {
+      beforeId: first.at(-1)!.id,
+    });
+    const mine = [...first, ...older].filter((event) =>
+      event.message.startsWith("batched row "),
+    );
+    expect(new Set(mine.map((event) => event.id)).size).toBe(150);
+  } finally {
+    await pool.query("DELETE FROM activity_events WHERE user_id=$1", [user.id]);
+    await cleanup(pool, user.id);
+    await pool.end();
+  }
+});
 
 test("bulk import, deduplication, origin checks and activity are owner scoped", async ({
   request,
@@ -250,7 +285,8 @@ test("worker resolves a company, scans its API and records actions with injected
         "api",
         "resolved",
         "scan-start",
-        "import",
+        // Per-listing "import" rows are no longer persisted; the counts live
+        // on the run summary instead.
         "scan-complete",
       ]),
     );
