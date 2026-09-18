@@ -40,6 +40,13 @@ export interface Session {
   onJsonResponse(
     handler: (request: CapturedJsonRequest, body: unknown) => Promise<void>,
   ): void;
+  /**
+   * Called with a short, plain-language reason whenever a same-origin JSON
+   * response looked like an API candidate (right verb, host, status 200,
+   * JSON content type) but was dropped before it could reach
+   * `onJsonResponse` — oversize or unparsable.
+   */
+  onJsonSkip(handler: (url: string, reason: string) => void): void;
   /** Resolves once the network has been idle, capped at 20 s. */
   settle(): Promise<void>;
 }
@@ -164,6 +171,16 @@ export function createSession(deps: SessionDeps): Session {
   const jsonHandlers: Array<
     (request: CapturedJsonRequest, body: unknown) => Promise<void>
   > = [];
+  // Reasons a candidate response (right verb, host, status, content type) was
+  // dropped before it could reach `onJsonResponse` — oversize or unparsable.
+  // The mundane misses (wrong verb, wrong host, non-200, non-JSON) are not
+  // reported here: on a page with `blockedResource` already stripping
+  // images/fonts/css/media, everything left in `page.on("response")` is
+  // documents, scripts and XHR/fetch, so most of those "misses" are just
+  // ordinary script loads — reporting every one would drown the two
+  // categories that actually have a user-visible consequence (this response
+  // looked like an API call and got dropped anyway) in noise.
+  const skipHandlers: Array<(url: string, reason: string) => void> = [];
   // Registered once, unconditionally: `context.route` (in `withSession`)
   // already refused any request off-host or resolving to a private address
   // before it could ever produce a response here, so this listener only
@@ -191,6 +208,21 @@ export function createSession(deps: SessionDeps): Session {
       if (response.status() !== 200) return;
       const contentType = response.headers()["content-type"] ?? "";
       if (!contentType.toLowerCase().includes("json")) return;
+      const reportSkip = (reason: string) => {
+        for (const handler of skipHandlers) handler(response.url(), reason);
+      };
+      // Checked against the *declared* size before ever calling `body()`: a
+      // hostile page can otherwise force a multi-hundred-MB allocation
+      // before the byteLength check below gets a chance to reject it. A
+      // header is a claim, not a fact, so a missing or non-numeric one falls
+      // straight through to that check as the backstop.
+      const declaredLength = Number(response.headers()["content-length"]);
+      if (Number.isFinite(declaredLength) && declaredLength >= maxJsonBytes) {
+        reportSkip(
+          `declares a ${declaredLength}-byte body, at or over the ${maxJsonBytes}-byte capture limit`,
+        );
+        return;
+      }
       let raw: Buffer;
       try {
         // A response can fail to materialise a body at all — the page
@@ -200,7 +232,12 @@ export function createSession(deps: SessionDeps): Session {
       } catch {
         return;
       }
-      if (raw.byteLength >= maxJsonBytes) return;
+      if (raw.byteLength >= maxJsonBytes) {
+        reportSkip(
+          `is ${raw.byteLength} bytes, at or over the ${maxJsonBytes}-byte capture limit`,
+        );
+        return;
+      }
       let body: unknown;
       try {
         body = JSON.parse(raw.toString("utf8"));
@@ -208,6 +245,9 @@ export function createSession(deps: SessionDeps): Session {
         // Malformed JSON (or a JSON content-type on a non-JSON body, which
         // happens) is skipped, not fatal — one bad response must not abort
         // capture for the whole page.
+        reportSkip(
+          "has a JSON content type but the body did not parse as JSON",
+        );
         return;
       }
       const captured: CapturedJsonRequest = {
@@ -217,7 +257,24 @@ export function createSession(deps: SessionDeps): Session {
         body: method === "POST" ? request.postData() : null,
       };
       for (const handler of jsonHandlers) await handler(captured, body);
-    })();
+    })().catch((error: unknown) => {
+      // A handler that throws — or a bug in the filtering above — must not
+      // become an unhandled rejection: on this Node version that terminates
+      // the whole process, taking every concurrent crawl down with it for
+      // one untrusted page's response. Logging it, rather than swallowing it
+      // silently, is what keeps "every refusal is recorded" true here too:
+      // this is a refusal to record one capture, not a reason to lose the
+      // process.
+      console.error(
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          level: "error",
+          event: "crawler.json_response_handler_failed",
+          url: response.url(),
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    });
   });
   return {
     async open(url) {
@@ -323,6 +380,9 @@ export function createSession(deps: SessionDeps): Session {
     },
     onJsonResponse(handler) {
       jsonHandlers.push(handler);
+    },
+    onJsonSkip(handler) {
+      skipHandlers.push(handler);
     },
     async settle() {
       // Capture has no navigation of its own to wait on — the page's own

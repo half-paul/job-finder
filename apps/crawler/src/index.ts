@@ -29,6 +29,20 @@ function log(
   else console.log(line);
 }
 
+// Defence in depth, not the fix: `session.ts`'s own response listener now
+// catches its own rejections (an untrusted page must not be able to crash
+// this process by triggering one). This exists so a *future* unguarded
+// `void someAsyncFn()` anywhere in the crawler — over pages we do not
+// control — degrades to one logged failure instead of taking down every
+// concurrent crawl. Node 24 terminates the process on an unhandled
+// rejection by default; this is what stops that from being reintroduced
+// silently.
+process.on("unhandledRejection", (reason) => {
+  log("error", "crawler.unhandled_rejection", {
+    error: reason instanceof Error ? reason.message : String(reason),
+  });
+});
+
 /** Constant-time compare so the secret cannot be guessed byte by byte. */
 function authorised(header: string | undefined): boolean {
   if (!header?.startsWith("Bearer ")) return false;

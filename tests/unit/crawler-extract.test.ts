@@ -142,4 +142,20 @@ describe("posting array detection", () => {
       postingArrayPointer({ results: [{ colour: "red" }, { colour: "blue" }] }),
     ).toBeNull();
   });
+
+  it("gives up past a depth cap instead of recursing until the stack overflows", () => {
+    // A real postings array, but buried far past any shape a genuine API
+    // would use. If the depth cap did not exist, this would still resolve
+    // correctly (JS handles a few thousand stack frames fine) — the point of
+    // this test is the *cap*, not the stack limit itself, so it asserts the
+    // cap's actual, observable effect: giving up early returns null even
+    // though a real array is down there, rather than finding it.
+    let nested: unknown = [
+      { title: "A", url: "/a" },
+      { title: "B", url: "/b" },
+    ];
+    for (let i = 0; i < 5000; i++) nested = { level: nested };
+    expect(() => postingArrayPointer(nested)).not.toThrow();
+    expect(postingArrayPointer(nested)).toBeNull();
+  });
 });
