@@ -363,6 +363,10 @@ export const companyCandidates = pgTable(
   (t) => [
     uniqueIndex("candidate_owner_domain_unique").on(t.userId, t.domain),
     index("candidate_status_next_idx").on(t.status, t.nextCheckAt),
+    // Deleting a watchlist entry or a source nulls these columns out, and
+    // deleteWatchlist also looks candidates up by watchlist id.
+    index("candidate_watchlist_idx").on(t.watchlistId),
+    index("candidate_source_idx").on(t.sourceId),
   ],
 );
 
@@ -445,5 +449,11 @@ export const activityEvents = pgTable(
     estimatedCostMicros: integer("estimated_cost_micros").notNull().default(0),
     createdAt: createdAt(),
   },
-  (t) => [index("activity_owner_created_idx").on(t.userId, t.createdAt)],
+  (t) => [
+    index("activity_owner_created_idx").on(t.userId, t.createdAt),
+    // Both foreign keys cascade on delete: without these a company or source
+    // removal scans the whole table to find the rows it has to delete.
+    index("activity_candidate_idx").on(t.candidateId),
+    index("activity_source_idx").on(t.sourceId),
+  ],
 );
