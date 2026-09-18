@@ -5,6 +5,7 @@ import { Bookmark, Trash2, RefreshCw } from "lucide-react";
 import { watchlistPriorities, type WatchlistPriority } from "@jobfinder/shared";
 import type { watchlist } from "../lib/automation";
 import { api } from "./client";
+import { Button } from "./ui/button";
 import { CompanyIntake } from "./company-intake";
 import { ActivityFeed } from "./activity-feed";
 
@@ -109,13 +110,14 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
               Remove an entry to stop scanning it directly.
             </p>
             {entries.length > 0 && (
-              <button
-                className="button-secondary"
+              <Button
+                type="button"
+                variant="outline"
                 onClick={handleScanAll}
                 disabled={scanningAll}
               >
                 {scanningAll ? "Scanning all…" : "Scan all"}
-              </button>
+              </Button>
             )}
           </div>
         </div>
@@ -190,7 +192,7 @@ export function WatchlistBoard({ entries }: { entries: Entry[] }) {
                     <td className="row-actions">
                       <button
                         type="button"
-                        className="icon-button"
+                        className="icon-button-labeled"
                         aria-label={`Scan ${entry.company} now`}
                         disabled={
                           !entry.source ||

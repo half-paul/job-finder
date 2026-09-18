@@ -18,6 +18,7 @@ import {
   Radar,
   Menu,
   BookmarkCheck,
+  Building2,
   Workflow,
 } from "lucide-react";
 import { api } from "./client";
@@ -30,7 +31,7 @@ const nav = [
   ["/applications", "Applications", Layers3],
   ["/archived", "Archived", Archive],
   ["/discovery", "Discovery", Radar],
-  ["/companies", "Companies", BookmarkCheck],
+  ["/companies", "Companies", Building2],
   ["/watchlist", "Watchlist", BookmarkCheck],
   ["/automation", "Automation", Workflow],
   ["/profile", "Career profile", UserRound],
