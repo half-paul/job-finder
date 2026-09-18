@@ -1,15 +1,11 @@
-import { extractJsonLdJobs, type JsonLdJob } from "@jobfinder/job-sources";
+import {
+  extractJsonLdJobs,
+  htmlToText,
+  type JsonLdJob,
+} from "@jobfinder/job-sources";
 import { hostAllowed } from "./policy";
 
 const anchorPattern = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-
-const stripTags = (value: string) =>
-  value
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 
 /** A posting path carries a slug plus a job word or a numeric id. */
 const postingPath =
@@ -50,7 +46,7 @@ export function nextPageLink(html: string, base: URL): URL | null {
   let match: RegExpExecArray | null;
   while ((match = anchorPattern.exec(html))) {
     const tag = match[0];
-    const text = stripTags(match[2]).toLowerCase();
+    const text = htmlToText(match[2]).toLowerCase();
     const isNext =
       nextMarkers.some((marker) => marker.test(tag)) || text === "next";
     if (!isNext) continue;
@@ -71,7 +67,9 @@ const locationPattern =
 
 /**
  * JSON-LD first, because it is the site's own structured answer. The DOM
- * fallback is deliberately shallow: `h1` plus the longest text block.
+ * fallback searches for a dedicated description container (class/id/data-*
+ * matching "description"), falls back to <main> or <article>, then strips
+ * nav/header/footer before using the rest of the page.
  */
 export function extractPosting(
   html: string,
@@ -88,18 +86,49 @@ export function extractPosting(
     return {
       title: structured.title.trim(),
       location: jsonLdLocation(structured),
-      description: stripTags(structured.description ?? ""),
+      description: htmlToText(structured.description ?? ""),
       postedAt: structured.datePosted ?? null,
     };
   }
-  const title = stripTags(titlePattern.exec(html)?.[1] ?? "");
+  const title = htmlToText(titlePattern.exec(html)?.[1] ?? "");
   if (!title) return null;
   return {
     title,
-    location: stripTags(locationPattern.exec(html)?.[1] ?? ""),
-    description: stripTags(html).slice(0, 20_000),
+    location: htmlToText(locationPattern.exec(html)?.[1] ?? ""),
+    description: extractDescription(html).slice(0, 20_000),
     postedAt: null,
   };
+}
+
+/**
+ * Extract description, trying containers in order:
+ * 1. A container whose class, id, or data-* attribute contains "description"
+ * 2. The contents of <main> or <article>
+ * 3. The whole page with nav, header, footer stripped
+ */
+function extractDescription(html: string): string {
+  // Try 1: Container with description in attribute
+  // Match: any tag with class/id/data-* containing "description" and its closing tag
+  const descriptionContainerPattern =
+    /<([a-z]+)\b[^>]+(?:class|id|data-[a-z-]+)=["'][^"']*description[^"']*["'][^>]*>([\s\S]*?)<\/\1>/i;
+  const descMatch = descriptionContainerPattern.exec(html);
+  if (descMatch?.[2]) {
+    return htmlToText(descMatch[2]);
+  }
+
+  // Try 2: <main> or <article>
+  const mainMatch =
+    /<(?:main|article)\b[^>]*>([\s\S]*?)<\/(?:main|article)>/i.exec(html);
+  if (mainMatch?.[1]) {
+    return htmlToText(mainMatch[1]);
+  }
+
+  // Try 3: Whole page with nav, header, footer stripped
+  const stripped = html
+    .replace(/<nav\b[\s\S]*?<\/nav>/gi, " ")
+    .replace(/<header\b[\s\S]*?<\/header>/gi, " ")
+    .replace(/<footer\b[\s\S]*?<\/footer>/gi, " ");
+  return htmlToText(stripped);
 }
 
 /**

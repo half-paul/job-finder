@@ -52,4 +52,29 @@ describe("crawler extraction", () => {
       extractPosting(html, new URL("https://acme.example/careers/job/x-1")),
     ).toMatchObject({ title: "Right Title", postedAt: "2026-09-01" });
   });
+
+  it("extracts description from a dedicated container and excludes nav", () => {
+    const posting = extractPosting(
+      fixture("with-nav.html"),
+      new URL("https://acme.example/careers/job/senior-dev-1"),
+    );
+    expect(posting?.description).toContain("Build amazing systems");
+    expect(posting?.description).toContain("own the full lifecycle");
+    expect(posting?.description).not.toContain("Home");
+    expect(posting?.description).not.toContain("Careers");
+  });
+
+  it("decodes HTML entities in descriptions", () => {
+    const html = `<html><body><h1>Job Title</h1><div class="description">
+      You&apos;ll build tools &amp; systems. We&apos;re looking for a team player.
+    </div></body></html>`;
+    const posting = extractPosting(
+      html,
+      new URL("https://acme.example/careers/job/x-1"),
+    );
+    expect(posting?.description).toContain("You'll build");
+    expect(posting?.description).toContain("tools & systems");
+    expect(posting?.description).not.toContain("&apos;");
+    expect(posting?.description).not.toContain("&amp;");
+  });
 });
