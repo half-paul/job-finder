@@ -1,4 +1,3 @@
-import { Agent } from "undici";
 import {
   discoveryAgentToken,
   discoveryUserAgent,
@@ -8,13 +7,6 @@ import {
 import { CrawlerFailure } from "./failure";
 
 /**
- * Node's global `fetch` accepts a non-standard `dispatcher` option that
- * lib.dom's `RequestInit` does not declare, so it is added here rather than
- * asserted away at the call site.
- */
-type FetchInit = RequestInit & { dispatcher?: Agent };
-
-/**
  * The crawler cannot reuse `RobotsCache`: that class is bound to the worker's
  * pinned-DNS transport. The rules and the verdict are the same, and come from
  * the same pure functions, so the two paths cannot drift on interpretation.
@@ -22,22 +14,37 @@ type FetchInit = RequestInit & { dispatcher?: Agent };
 export async function fetchRobots(
   origin: URL,
 ): Promise<{ allows(path: string): boolean }> {
-  // `origin.origin` (not a hand-built `https://${hostname}`) preserves a
-  // non-default port — dropping it sent every non-443 origin, including the
-  // e2e fixture's ephemeral port, to the wrong endpoint.
-  const init: FetchInit = {
-    headers: { "user-agent": discoveryUserAgent, accept: "text/plain" },
-    redirect: "follow",
-    signal: AbortSignal.timeout(15_000),
-  };
-  // Test-only: the e2e fixture serves a self-signed certificate. Never set
-  // this in Compose or CI's deployed environment. Mirrors the same gate on
-  // `ignoreHTTPSErrors` in session.ts, which covers the browser's requests;
-  // this covers the plain `fetch` robots.txt request, which Playwright does
-  // not intercept.
-  if (process.env.CRAWLER_INSECURE_TLS === "1")
-    init.dispatcher = new Agent({ connect: { rejectUnauthorized: false } });
-  const response = await fetch(`${origin.origin}/robots.txt`, init);
+  let response: Response;
+  try {
+    // `origin.origin` (not a hand-built `https://${hostname}`) preserves a
+    // non-default port — dropping it sent every non-443 origin, including
+    // the e2e fixture's ephemeral port, to the wrong endpoint.
+    //
+    // The e2e fixture's self-signed certificate is NOT handled here. A
+    // per-request `dispatcher` option was tried and reverted: Node bundles
+    // undici 7.x internally for the global `fetch`, the standalone `undici`
+    // package installs 8.x, and the v8 `Agent` rejected requests built by
+    // Node's own v7 handler outright — breaking every robots fetch,
+    // including ones with a perfectly valid certificate. The test
+    // environment instead relaxes TLS at container startup
+    // (`NODE_TLS_REJECT_UNAUTHORIZED=0`, set only on the e2e crawler
+    // container). Do not reintroduce a dispatcher here.
+    response = await fetch(`${origin.origin}/robots.txt`, {
+      headers: { "user-agent": discoveryUserAgent, accept: "text/plain" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (error) {
+    // DNS failure, connection refused, TLS rejection, or the timeout above
+    // all land here as a raw TypeError/DOMException. Wrapped so the caller
+    // gets a plain-language 422 refusal instead of an unhandled 500.
+    throw new CrawlerFailure(
+      `Cannot reach robots.txt for ${origin.hostname}: ${
+        error instanceof Error ? error.message : "network error"
+      }`,
+      "blocked",
+    );
+  }
   if (response.status === 404 || response.status === 410) {
     const empty = parseRobots("");
     return {

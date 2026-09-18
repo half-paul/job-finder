@@ -70,14 +70,15 @@ export async function runCrawl(input: CrawlRequest): Promise<CrawlResponse> {
       } catch (error) {
         // A CAPTCHA ends the whole crawl: the site has declined automated
         // access outright, and trying the next URL only invites another one.
-        // A spent session budget ("timeout") is exactly as unrecoverable —
-        // every remaining URL would fail the same way, so continuing would
-        // burn hundreds of dead iterations at maxJobs and, worse, bury the
-        // one warning that actually explains what happened once
-        // `warnings.slice(0, 50)` truncates the pile of copies.
+        // `fatal` covers the other whole-crawl case: a spent session budget,
+        // which is `kind: "timeout"` but so is a single slow page's own
+        // `goto` timeout — those two are NOT the same thing. Matching on
+        // `kind === "timeout"` alone would abort the crawl over one slow
+        // page that should just be skipped, so the budget case is the one
+        // that sets `fatal: true`; a per-page timeout does not.
         if (
           error instanceof CrawlerFailure &&
-          (error.kind === "captcha" || error.kind === "timeout")
+          (error.kind === "captcha" || error.fatal)
         )
           throw error;
         warnings.push(

@@ -86,7 +86,13 @@ export async function withSession<T>(
     const session: Session = {
       async open(url) {
         if (Date.now() > deadline)
-          throw new CrawlerFailure("Crawl session budget exhausted", "timeout");
+          // fatal: the budget is spent for the whole session, not just this
+          // page — every remaining URL would fail the same way.
+          throw new CrawlerFailure(
+            "Crawl session budget exhausted",
+            "timeout",
+            true,
+          );
         if (!hostAllowed(url, origin))
           throw new CrawlerFailure(
             `Navigation off-host: ${url.href}`,
@@ -106,11 +112,12 @@ export async function withSession<T>(
             timeout: Math.max(1, Math.min(20_000, deadline - Date.now())),
           })
           .catch((error: Error) => {
-            // Playwright's own timeout (a slow page, not our budget check
-            // above) is identifiable by name; anything else is a genuine
-            // navigation failure (DNS, connection reset, etc). Getting this
-            // right matters: the per-posting loop in crawl.ts re-throws on
-            // "timeout" instead of treating it as a skippable posting.
+            // Playwright's own timeout (this one page loaded slowly) is
+            // identifiable by name; anything else is a genuine navigation
+            // failure (DNS, connection reset, etc). This is deliberately
+            // NOT fatal: a single slow page does not mean the session
+            // budget is spent, so the crawl should skip it and continue —
+            // unlike the budget check above, which is.
             const kind =
               error.name === "TimeoutError" ? "timeout" : "navigation";
             throw new CrawlerFailure(error.message, kind);
