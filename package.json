@@ -21,6 +21,7 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "worker": "npm run start -w @jobfinder/worker",
+    "crawler": "npm run start -w @jobfinder/crawler",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file-if-exists=.env.local packages/db/src/migrate.ts"
   },
@@ -37,6 +38,7 @@
     "next": "^16.3.5",
     "pg": "^8.23.0",
     "pg-boss": "^12.32.0",
+    "playwright": "^1.63.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "tailwind-merge": "^3.7.0",
