@@ -2,7 +2,7 @@ import {
   createAdaptiveCareersConnector,
   type ExtractPage,
 } from "@jobfinder/discovery";
-import { recordActivity } from "./activity";
+import { recordActivities, recordActivity } from "./activity";
 import { discoveryExtractor } from "./discovery-ai";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -165,15 +165,28 @@ export async function scanSourceWithDb(
   });
   const startedAt = Date.now();
   const actor = trigger === "Schedule" ? "Worker" : "Application";
+  const event = (stage: string, message: string) => ({
+    userId,
+    sourceId,
+    runId: run.id,
+    actor,
+    stage,
+    message: `${source.company || source.provider}: ${message}`,
+  });
   const progress = (stage: string, message: string) =>
-    recordActivity(db, {
-      userId,
-      sourceId,
-      runId: run.id,
-      actor,
-      stage,
-      message: `${source.company || source.provider}: ${message}`,
-    });
+    recordActivity(db, event(stage, message));
+  // Per-listing progress is buffered and written in batches: a 5000-job scan
+  // must not pay one INSERT round trip per listing.
+  const buffered: ReturnType<typeof event>[] = [];
+  const flushProgress = async () => {
+    if (!buffered.length) return;
+    const batch = buffered.splice(0, buffered.length);
+    await recordActivities(db, batch);
+  };
+  const bufferProgress = async (stage: string, message: string) => {
+    buffered.push(event(stage, message));
+    if (buffered.length >= 50) await flushProgress();
+  };
   await progress(
     "scan-start",
     `Starting ${trigger.toLowerCase()} scan using ${source.provider}.`,
@@ -269,7 +282,7 @@ export async function scanSourceWithDb(
             // Previously imported listings therefore stay untouched.
             if (!keywordFilter(normalized, settings).passed) {
               filtered++;
-              await progress(
+              await bufferProgress(
                 "filter",
                 `${normalized.title}: skipped by keyword filters.`,
               );
@@ -283,9 +296,9 @@ export async function scanSourceWithDb(
             );
             if (result === "added") added++;
             if (result === "updated") updated++;
-            await progress("import", `${normalized.title}: ${result}.`);
+            await bufferProgress("import", `${normalized.title}: ${result}.`);
           } catch (error) {
-            await progress(
+            await bufferProgress(
               "warning",
               `${reference.externalId}: ${error instanceof Error ? error.message : "Could not read posting"}`,
             );
@@ -305,6 +318,7 @@ export async function scanSourceWithDb(
                 .where(eq(searchRuns.id, run.id));
           }
         }
+        await flushProgress();
       }
       await db
         .update(searchRuns)
@@ -384,6 +398,9 @@ export async function scanSourceWithDb(
       },
     });
   } catch (error) {
+    // Buffered listing progress explains what the scan managed before it
+    // failed, so it is written before the failure event.
+    await flushProgress().catch(() => undefined);
     await db
       .update(searchRuns)
       .set({

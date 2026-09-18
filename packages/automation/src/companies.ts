@@ -8,7 +8,7 @@ import {
 import { parseSeedList } from "@jobfinder/discovery";
 import { AppError, watchlistKey } from "@jobfinder/shared";
 import type { AutomationDb } from "./scan";
-import { recordActivity } from "./activity";
+import { recordActivities, recordActivity } from "./activity";
 
 export async function importCompanies(
   db: AutomationDb,
@@ -16,88 +16,145 @@ export async function importCompanies(
   text: string,
 ) {
   const parsed = parseSeedList(text);
-  let imported = 0;
-  let duplicates = 0;
-  for (const row of parsed.rows) {
-    const inserted = await db.transaction(async (tx) => {
-      const [candidate] = await tx
-        .insert(companyCandidates)
-        .values({
+  if (!parsed.rows.length)
+    return { imported: 0, duplicates: 0, rejected: parsed.rejected };
+  // One transaction with set-based writes: an import of the 500-row limit
+  // costs a handful of round trips rather than one transaction per row.
+  return db.transaction(async (tx) => {
+    const candidates = await tx
+      .insert(companyCandidates)
+      .values(
+        parsed.rows.map((row) => ({
           userId,
           name: row.name,
           domain: row.domain,
           websiteUrl: row.websiteUrl ?? `https://${row.domain}/`,
-        })
-        .onConflictDoNothing()
-        .returning();
-      if (!candidate) return false;
-      const key = watchlistKey(row.name);
-      const [watch] = await tx
-        .insert(companyWatchlists)
-        .values({
+        })),
+      )
+      .onConflictDoNothing()
+      .returning({
+        id: companyCandidates.id,
+        name: companyCandidates.name,
+        domain: companyCandidates.domain,
+      });
+    const imported = candidates.length;
+    const duplicates = parsed.rows.length - imported;
+    if (!imported) return { imported, duplicates, rejected: parsed.rejected };
+
+    const keyed = candidates.map((candidate) => ({
+      ...candidate,
+      key: watchlistKey(candidate.name),
+    }));
+    await tx
+      .insert(companyWatchlists)
+      .values(
+        keyed.map((candidate) => ({
           userId,
-          company: row.name,
-          companyKey: key,
-          domain: row.domain,
-        })
-        .onConflictDoNothing()
-        .returning();
-      const existing =
-        watch ??
-        (
-          await tx
-            .select()
-            .from(companyWatchlists)
-            .where(
-              and(
-                eq(companyWatchlists.userId, userId),
-                eq(companyWatchlists.companyKey, key),
-              ),
-            )
-        )[0];
+          company: candidate.name,
+          companyKey: candidate.key,
+          domain: candidate.domain,
+        })),
+      )
+      .onConflictDoNothing();
+    const watchlists = await tx
+      .select({
+        id: companyWatchlists.id,
+        companyKey: companyWatchlists.companyKey,
+        domain: companyWatchlists.domain,
+      })
+      .from(companyWatchlists)
+      .where(
+        and(
+          eq(companyWatchlists.userId, userId),
+          inArray(
+            companyWatchlists.companyKey,
+            keyed.map((candidate) => candidate.key),
+          ),
+        ),
+      );
+    const watchlistByKey = new Map(
+      watchlists.map((entry) => [entry.companyKey, entry]),
+    );
+
+    const links: { candidateId: string; watchlistId: string }[] = [];
+    const backfill: { watchlistId: string; domain: string }[] = [];
+    for (const candidate of keyed) {
+      const entry = watchlistByKey.get(candidate.key);
       // Distinct domains can have the same display name; do not repoint an unrelated watchlist.
-      if (existing && (!existing.domain || existing.domain === row.domain)) {
-        if (!existing.domain)
-          await tx
-            .update(companyWatchlists)
-            .set({ domain: row.domain })
-            .where(eq(companyWatchlists.id, existing.id));
-        await tx
-          .update(companyCandidates)
-          .set({ watchlistId: existing.id })
-          .where(eq(companyCandidates.id, candidate.id));
-      }
-      await recordActivity(tx, {
+      if (!entry || (entry.domain && entry.domain !== candidate.domain))
+        continue;
+      if (!entry.domain)
+        backfill.push({ watchlistId: entry.id, domain: candidate.domain });
+      links.push({ candidateId: candidate.id, watchlistId: entry.id });
+    }
+    if (backfill.length)
+      await tx.execute(sql`
+        update company_watchlists as w set domain = v.domain
+        from (values ${sql.join(
+          backfill.map(
+            (row) => sql`(${row.watchlistId}::uuid, ${row.domain}::text)`,
+          ),
+          sql`, `,
+        )}) as v(id, domain)
+        where w.id = v.id
+      `);
+    if (links.length)
+      await tx.execute(sql`
+        update company_candidates as c set watchlist_id = v.watchlist_id
+        from (values ${sql.join(
+          links.map(
+            (row) => sql`(${row.candidateId}::uuid, ${row.watchlistId}::uuid)`,
+          ),
+          sql`, `,
+        )}) as v(candidate_id, watchlist_id)
+        where c.id = v.candidate_id
+      `);
+
+    await recordActivities(
+      tx,
+      candidates.map((candidate) => ({
         userId,
         candidateId: candidate.id,
         actor: "Application",
         stage: "queued",
-        message: `${row.name}: queued for website and careers discovery.`,
-      });
-      return true;
-    });
-    if (inserted) imported++;
-    else duplicates++;
-  }
-  return { imported, duplicates, rejected: parsed.rejected };
+        message: `${candidate.name}: queued for website and careers discovery.`,
+      })),
+    );
+    return { imported, duplicates, rejected: parsed.rejected };
+  });
 }
 
-export async function listCompanies(db: AutomationDb, userId: string) {
+/** One import can add 500 rows, so the board reads a bounded page of them. */
+export const companyPageLimit = 500;
+export async function listCompanies(
+  db: AutomationDb,
+  userId: string,
+  options: { limit?: number } = {},
+) {
+  const limit = Math.min(
+    Math.max(options.limit ?? companyPageLimit, 1),
+    companyPageLimit,
+  );
   const rows = await db
     .select({ candidate: companyCandidates, source: jobSources })
     .from(companyCandidates)
     .leftJoin(jobSources, eq(jobSources.id, companyCandidates.sourceId))
     .where(eq(companyCandidates.userId, userId))
-    .orderBy(asc(companyCandidates.name));
+    .orderBy(asc(companyCandidates.name))
+    .limit(limit);
   const runs = await db
     .select()
     .from(searchRuns)
     .where(eq(searchRuns.userId, userId))
     .orderBy(desc(searchRuns.startedAt))
     .limit(500);
+  const latestRunBySource = new Map<string, (typeof runs)[number]>();
+  for (const run of runs)
+    if (run.sourceId && !latestRunBySource.has(run.sourceId))
+      latestRunBySource.set(run.sourceId, run);
   return rows.map((row) => ({
     ...row,
-    lastRun: runs.find((run) => run.sourceId === row.source?.id) ?? null,
+    lastRun: (row.source && latestRunBySource.get(row.source.id)) ?? null,
   }));
 }
 

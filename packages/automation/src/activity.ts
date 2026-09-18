@@ -7,9 +7,21 @@ export type ActivityInput = Omit<
   "id" | "createdAt"
 >;
 export async function recordActivity(db: AutomationDb, input: ActivityInput) {
-  await db
-    .insert(activityEvents)
-    .values({ ...input, message: input.message.slice(0, 1000) });
+  await recordActivities(db, [input]);
+}
+
+/** One insert for a batch of events: bulk paths must not write row by row. */
+export async function recordActivities(
+  db: AutomationDb,
+  inputs: ActivityInput[],
+) {
+  if (!inputs.length) return;
+  await db.insert(activityEvents).values(
+    inputs.map((input) => ({
+      ...input,
+      message: input.message.slice(0, 1000),
+    })),
+  );
 }
 
 export async function listActivity(
