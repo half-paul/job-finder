@@ -190,6 +190,49 @@ describe("automatic careers discovery", () => {
     });
     expect(extractPage).toHaveBeenCalledTimes(2);
   });
+  it("stops spending AI calls after the fourth page and leaves the walk incomplete", async () => {
+    const stepUrl = (n: number) => `https://acme.example/careers/step-${n}`;
+    const extractPage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        jobs: [job],
+        nextUrls: [stepUrl(1)],
+        noOpenings: false,
+      })
+      .mockResolvedValueOnce({
+        jobs: [],
+        nextUrls: [stepUrl(2)],
+        noOpenings: false,
+      })
+      .mockResolvedValueOnce({
+        jobs: [],
+        nextUrls: [stepUrl(3)],
+        noOpenings: false,
+      })
+      .mockResolvedValueOnce({
+        jobs: [],
+        nextUrls: [stepUrl(4)],
+        noOpenings: false,
+      });
+    const connector = createAdaptiveCareersConnector({
+      extractPage,
+      fetchImpl: fixtureFetch({
+        "https://acme.example/careers": "<p>Start</p>",
+        [stepUrl(1)]: "<p>Step 1</p>",
+        [stepUrl(2)]: "<p>Step 2</p>",
+        [stepUrl(3)]: "<p>Step 3</p>",
+        [stepUrl(4)]: "<p>Step 4</p>",
+      }),
+    });
+    const page = await connector.search({
+      board: "acme",
+      terms: [],
+      sourceUrl: "https://acme.example/careers",
+    });
+    expect(extractPage).toHaveBeenCalledTimes(4);
+    expect(page.complete).toBe(false);
+    expect(page.jobs).toHaveLength(1);
+  });
   it("does not fetch a redirect outside the company or ATS", async () => {
     const fetchImpl = fixtureFetch({
       "https://acme.example/careers": new Response(null, {
@@ -349,4 +392,85 @@ it("does not treat an unavailable robots policy as crawl permission", async () =
   await expect(
     resolveCompanyWebsite("https://acme.example/", { fetchImpl }),
   ).rejects.toThrow("Cannot verify robots.txt");
+});
+
+describe("resolver edge cases", () => {
+  it("fails loudly when the company website itself is unreachable", async () => {
+    await expect(
+      resolveCompanyWebsite("https://acme.example/", {
+        fetchImpl: fixtureFetch({
+          "https://acme.example/": new Response("down", { status: 500 }),
+        }),
+      }),
+    ).rejects.toThrow("Company website returned HTTP 500");
+  });
+
+  it("prefers structured listings already on the homepage over AI", async () => {
+    const posting = `<script type="application/ld+json">${JSON.stringify({ "@type": "JobPosting", ...job })}</script>`;
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({ "https://acme.example/": posting }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "json-ld",
+      provider: "Careers",
+      careersUrl: "https://acme.example/",
+    });
+  });
+
+  it("falls back to AI extraction when a detected ATS vendor has no connector", async () => {
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers":
+          '<a href="https://acme.wd5.myworkdayjobs.com/en-US/External">Apply</a>',
+      }),
+    });
+    expect(resolution).toMatchObject({ strategy: "ai", ats: "Workday" });
+  });
+});
+
+describe("adaptive careers connector edge cases", () => {
+  it("rejects an AI-suggested job URL outside the company or ATS hosts", async () => {
+    const connector = createAdaptiveCareersConnector({
+      extractPage: async () => ({
+        jobs: [{ ...job, url: "https://attacker.example/jobs/1" }],
+        nextUrls: [],
+        noOpenings: false,
+      }),
+      fetchImpl: fixtureFetch({
+        "https://acme.example/careers": "<h1>Careers at Acme</h1>",
+      }),
+    });
+    await expect(
+      connector.search({
+        board: "acme",
+        terms: [],
+        sourceUrl: "https://acme.example/careers",
+      }),
+    ).rejects.toThrow("AI returned a job URL outside");
+  });
+
+  it("succeeds with zero jobs when the AI confirms there are no openings", async () => {
+    const connector = createAdaptiveCareersConnector({
+      extractPage: async () => ({ jobs: [], nextUrls: [], noOpenings: true }),
+      fetchImpl: fixtureFetch({
+        "https://acme.example/careers": "<h1>No openings right now</h1>",
+      }),
+    });
+    const page = await connector.search({
+      board: "acme",
+      terms: [],
+      sourceUrl: "https://acme.example/careers",
+    });
+    expect(page).toMatchObject({ jobs: [], complete: true });
+  });
+});
+
+describe("createPageExtractor configuration", () => {
+  it("refuses to call the model without an API key", async () => {
+    const extract = createPageExtractor({ apiKey: "" });
+    await expect(
+      extract({ url: job.url, text: job.title, links: [] }),
+    ).rejects.toThrow("OPENAI_API_KEY");
+  });
 });

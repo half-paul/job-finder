@@ -37,6 +37,7 @@ import type { APIRequestContext } from "@playwright/test";
 import { getDb } from "@jobfinder/db";
 import {
   claimCompany,
+  deleteWatchlist,
   importCompanies,
   listActivity,
   listCompanies,
@@ -478,6 +479,262 @@ test("AI discovery estimates are persisted and the monthly budget prevents anoth
     expect(
       entries.filter((event) => event.stage === "ai-budget"),
     ).toMatchObject([{ estimatedCostMicros: 50_000, actor: "Worker" }]);
+  } finally {
+    await cleanup(pool, user.id);
+    await pool.end();
+  }
+});
+
+test("the owner can retry a failed company and then remove it, disabling its source", async ({
+  request,
+}) => {
+  const user = await register(request);
+  const pool = new Pool({ connectionString: databaseUrl });
+  try {
+    await importCompanies(getDb(), user.id, "Fixture,fixture.example");
+    const [{ candidate }] = await listCompanies(getDb(), user.id);
+    await runResolveCompanyJob(
+      getDb(),
+      { data: { candidateId: candidate.id, userId: user.id } },
+      { fetchImpl: fixtureFetch },
+    );
+    const [resolved] = await listCompanies(getDb(), user.id);
+    await pool.query(
+      "UPDATE company_candidates SET status='Failed', error='Source scan failed' WHERE id=$1",
+      [candidate.id],
+    );
+    const retried = await request.post(`/api/companies/${candidate.id}`, {
+      headers,
+    });
+    expect(retried.ok(), await retried.text()).toBe(true);
+    expect(await retried.json()).toMatchObject({
+      status: "Pending",
+      error: "",
+    });
+    const removed = await request.delete(`/api/companies/${candidate.id}`, {
+      headers,
+    });
+    expect(removed.ok(), await removed.text()).toBe(true);
+    expect(await listCompanies(getDb(), user.id)).toHaveLength(0);
+    const source = await pool.query(
+      "SELECT enabled, schedule FROM job_sources WHERE id=$1",
+      [resolved.source!.id],
+    );
+    expect(source.rows[0]).toMatchObject({
+      enabled: false,
+      schedule: "Manual",
+    });
+    const watchlist = await pool.query(
+      "SELECT id FROM company_watchlists WHERE user_id=$1",
+      [user.id],
+    );
+    expect(watchlist.rowCount).toBe(0);
+  } finally {
+    await cleanup(pool, user.id);
+    await pool.end();
+  }
+});
+
+test("removing a watchlist entry cascades its linked company candidate", async ({
+  request,
+}) => {
+  const user = await register(request);
+  const pool = new Pool({ connectionString: databaseUrl });
+  try {
+    await importCompanies(getDb(), user.id, "Fixture,https://fixture.example/");
+    const [{ candidate }] = await listCompanies(getDb(), user.id);
+    expect(candidate.watchlistId).not.toBeNull();
+    await deleteWatchlist(getDb(), user.id, candidate.watchlistId!);
+    expect(await listCompanies(getDb(), user.id)).toHaveLength(0);
+    const remaining = await pool.query(
+      "SELECT id FROM company_candidates WHERE id=$1",
+      [candidate.id],
+    );
+    expect(remaining.rowCount).toBe(0);
+  } finally {
+    await cleanup(pool, user.id);
+    await pool.end();
+  }
+});
+
+test("scanning a Careers source refuses to run until its candidate is approved", async ({
+  request,
+}) => {
+  const user = await register(request);
+  const pool = new Pool({ connectionString: databaseUrl });
+  try {
+    await importCompanies(getDb(), user.id, "Fixture,https://fixture.example/");
+    const [{ candidate }] = await listCompanies(getDb(), user.id);
+    const aiFetch = (async (input: RequestInfo | URL) =>
+      String(input).endsWith("robots.txt")
+        ? new Response("", { status: 404 })
+        : new Response(
+            "Platform Director. Lead cloud platform reliability and infrastructure architecture.",
+          )) as typeof fetch;
+    await runResolveCompanyJob(
+      getDb(),
+      { data: { userId: user.id, candidateId: candidate.id } },
+      { fetchImpl: aiFetch },
+    );
+    const [resolved] = await listCompanies(getDb(), user.id);
+    expect(resolved.candidate.strategy).toBe("ai");
+    expect(resolved.candidate.status).toBe("Resolved");
+    // A later failure (or a stale row from before re-resolution) leaves the
+    // approval gate closed even though the job_sources row still exists.
+    await pool.query(
+      "UPDATE company_candidates SET status='Failed' WHERE id=$1",
+      [candidate.id],
+    );
+    await expect(
+      scanSourceWithDb(
+        {
+          userId: user.id,
+          sourceId: resolved.source!.id,
+          connectorOptions: { fetchImpl: aiFetch },
+        },
+        getDb(),
+      ),
+    ).rejects.toThrow("must approve this careers source");
+  } finally {
+    await cleanup(pool, user.id);
+    await pool.end();
+  }
+});
+
+test("resolution failures unrelated to robots leave the candidate Failed with the error recorded", async ({
+  request,
+}) => {
+  const user = await register(request);
+  const pool = new Pool({ connectionString: databaseUrl });
+  try {
+    await importCompanies(getDb(), user.id, "Fixture,fixture.example");
+    const [{ candidate }] = await listCompanies(getDb(), user.id);
+    const result = await runResolveCompanyJob(
+      getDb(),
+      { data: { userId: user.id, candidateId: candidate.id } },
+      {
+        fetchImpl: (async () =>
+          new Response("Service unavailable", {
+            status: 500,
+          })) as typeof fetch,
+      },
+    );
+    expect(result).toEqual({ failed: true });
+    const [failed] = await listCompanies(getDb(), user.id);
+    expect(failed.candidate.status).toBe("Failed");
+    expect(failed.candidate.error).toContain("HTTP 500");
+    expect(
+      (await listActivity(getDb(), user.id)).map((event) => event.stage),
+    ).toContain("discovery-failed");
+  } finally {
+    await cleanup(pool, user.id);
+    await pool.end();
+  }
+});
+
+test("two imported organizations with the same name but different domains do not share a watchlist entry", async ({
+  request,
+}) => {
+  const user = await register(request);
+  const pool = new Pool({ connectionString: databaseUrl });
+  try {
+    const result = await importCompanies(
+      getDb(),
+      user.id,
+      "Acme,acme-us.example\nAcme,acme-eu.example",
+    );
+    expect(result.imported).toBe(2);
+    const rows = await listCompanies(getDb(), user.id);
+    const us = rows.find((r) => r.candidate.domain === "acme-us.example")!;
+    const eu = rows.find((r) => r.candidate.domain === "acme-eu.example")!;
+    expect(us.candidate.watchlistId).not.toBeNull();
+    // The second candidate's watchlist key collides with the first's; since the
+    // existing watchlist entry points at a different domain, it must not be
+    // repointed or shared with the second candidate.
+    expect(eu.candidate.watchlistId).toBeNull();
+    const watchlists = await pool.query(
+      "SELECT domain FROM company_watchlists WHERE user_id=$1",
+      [user.id],
+    );
+    expect(watchlists.rows).toEqual([{ domain: "acme-us.example" }]);
+  } finally {
+    await cleanup(pool, user.id);
+    await pool.end();
+  }
+});
+
+test("AI evaluation counts discovery spend against the same monthly budget", async ({
+  request,
+}) => {
+  const user = await register(request);
+  const pool = new Pool({ connectionString: databaseUrl });
+  try {
+    expect(
+      (
+        await request.put("/api/profile", {
+          headers,
+          data: {
+            name: "Budget check fixture",
+            summary:
+              "Technology executive focused on cloud transformation, security and responsible AI platforms.",
+            currentRole: "VP Infrastructure",
+            previousRoles: [],
+            yearsExperience: 20,
+            location: "Vancouver, Canada",
+            skills: ["Cloud architecture"],
+            industries: [],
+            certifications: [],
+            education: [],
+            languages: [],
+            workAuthorization: [],
+            leadershipExperience: "",
+            managementExperience: "",
+            companySizeExperience: [],
+            architectureExperience: "",
+          },
+        })
+      ).ok(),
+    ).toBe(true);
+    const job = await (
+      await request.post("/api/jobs", {
+        headers,
+        data: {
+          title: "VP Platform Engineering",
+          company: "Example Budget Inc.",
+          description:
+            "Lead cloud infrastructure and platform engineering for a growing SaaS company.",
+          location: "Vancouver, Canada",
+          country: "Canada",
+          industry: "SaaS",
+          employmentType: "Full-time",
+          seniority: "VP",
+          workType: "Remote",
+          salaryMin: null,
+          salaryMax: null,
+          salaryPeriod: "year",
+          currency: "CAD",
+          jobUrl: `https://example.test/careers/${randomUUID()}`,
+          postedAt: null,
+        },
+      })
+    ).json();
+    await pool.query(
+      "UPDATE career_preferences SET data=jsonb_set(data, '{aiMonthlyBudgetMicros}', '10000') WHERE user_id=$1",
+      [user.id],
+    );
+    // Simulate AI discovery having already reserved spend this month; the
+    // evaluation budget check must see it even though it never touched
+    // job_matches.
+    await pool.query(
+      `INSERT INTO activity_events (user_id, actor, stage, message, estimated_cost_micros)
+       VALUES ($1, 'Worker', 'ai-budget', 'fixture reservation', 20000)`,
+      [user.id],
+    );
+    const response = await request.post(`/api/jobs/${job.id}/evaluate`, {
+      headers,
+    });
+    expect(response.status()).toBe(429);
+    expect(await response.text()).toContain("monthly AI budget");
   } finally {
     await cleanup(pool, user.id);
     await pool.end();

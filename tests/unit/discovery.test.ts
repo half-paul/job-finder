@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  candidateStatuses,
   candidateStatusLabel,
   companyImportSchema,
   crawlPatternSpecSchema,
   crawlResponseSchema,
+  crawlStrategies,
   jsonPointerGet,
+  strategyLabel,
 } from "@jobfinder/shared";
 
 describe("Phase 5 shared discovery contracts", () => {
@@ -14,6 +17,21 @@ describe("Phase 5 shared discovery contracts", () => {
     expect(candidateStatusLabel.Unsupported).toBe(
       "Vendor recognised, not yet supported",
     );
+  });
+
+  it("has a plain-language label for every candidate status and crawl strategy", () => {
+    for (const status of candidateStatuses)
+      expect(candidateStatusLabel[status]).toEqual(expect.any(String));
+    expect(candidateStatusLabel.Resolving).toBe("Looking for careers page");
+    expect(candidateStatusLabel.Resolved).toBe("Resolved");
+    expect(candidateStatusLabel.NoCareersPage).toBe("No careers page found");
+    expect(candidateStatusLabel.Failed).toBe("Failed");
+    for (const strategy of crawlStrategies)
+      expect(strategyLabel[strategy]).toEqual(expect.any(String));
+    expect(strategyLabel.none).toBe("Not resolved");
+    expect(strategyLabel.ats).toBe("Scanning ATS board");
+    expect(strategyLabel["captured-api"]).toBe("Replaying saved API");
+    expect(strategyLabel.browser).toBe("Browser crawl");
   });
 
   it("bounds the import body", () => {
@@ -111,6 +129,14 @@ describe("Phase 5 seed list parser", () => {
       true,
     );
   });
+
+  it("rejects a name or domain longer than the field limit", () => {
+    const parsed = parseSeedList(`${"a".repeat(201)},acme.example`);
+    expect(parsed.rows).toEqual([]);
+    expect(parsed.rejected).toEqual([
+      { line: 1, reason: "Company name or domain is too long" },
+    ]);
+  });
 });
 
 describe("Phase 5 robots parser", () => {
@@ -145,6 +171,22 @@ Disallow: /careers/internal
     expect(robotsAllows(parseRobots(""), "/anything", "JobFinderBot")).toEqual({
       allowed: true,
     });
+  });
+
+  it("matches wildcard segments and an end anchor like Google's robots parser", () => {
+    const wildcard = parseRobots(
+      "User-agent: *\nDisallow: /*.pdf$\nDisallow: /files/*/private",
+    );
+    expect(robotsAllows(wildcard, "/reports/q1.pdf", "Bot")).toEqual({
+      allowed: false,
+      matchedRule: "Disallow: /*.pdf$",
+    });
+    expect(robotsAllows(wildcard, "/reports/q1.pdf.bak", "Bot").allowed).toBe(
+      true,
+    );
+    expect(robotsAllows(wildcard, "/files/team-a/private", "Bot").allowed).toBe(
+      false,
+    );
   });
 });
 
@@ -272,6 +314,21 @@ describe("Phase 5 discovery transport", () => {
       matchedRule: "Disallow: /careers",
     });
   });
+
+  it("treats a 401/403 on robots.txt itself as a block, not as allow-all", async () => {
+    const fetchImpl = routeFetch({
+      "https://d.example/robots.txt": () =>
+        new Response("Forbidden", { status: 403 }),
+    });
+    const robots = new RobotsCache({ fetchImpl, resolveHost: publicHost });
+    await expect(
+      discoveryFetch(new URL("https://d.example/"), {
+        fetchImpl,
+        resolveHost: publicHost,
+        robots,
+      }),
+    ).rejects.toBeInstanceOf(RobotsBlockedError);
+  });
 });
 
 import {
@@ -327,6 +384,34 @@ describe("Phase 5 careers URL finder", () => {
       fetched.indexOf("https://acme.example/jobs"),
     );
     expect(careersProbePaths[0]).toBe("/careers");
+  });
+
+  it("propagates a robots refusal on the best-scoring link instead of falling through to probe paths", async () => {
+    const fetched: string[] = [];
+    const fetchImpl = routeFetch({
+      "https://blocked.example/robots.txt": () =>
+        new Response("User-agent: *\nDisallow: /careers"),
+      "https://blocked.example/": () =>
+        new Response('<a href="/careers">Careers</a>'),
+      // If the robots refusal were swallowed, the probe list would reach here.
+      "https://blocked.example/jobs": () =>
+        new Response("<h1>Jobs at Blocked</h1>"),
+    });
+    const tracking = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetched.push(String(input));
+      return fetchImpl(input, init);
+    }) as typeof fetch;
+    await expect(
+      findCareersPage("blocked.example", {
+        fetchImpl: tracking,
+        resolveHost: publicHost,
+        robots: new RobotsCache({
+          fetchImpl: tracking,
+          resolveHost: publicHost,
+        }),
+      }),
+    ).rejects.toBeInstanceOf(RobotsBlockedError);
+    expect(fetched).not.toContain("https://blocked.example/jobs");
   });
 
   it("returns null when neither homepage links nor probes find a page", async () => {
@@ -411,6 +496,21 @@ describe("Phase 5 ATS detector", () => {
   it("returns null for a plain careers page", () => {
     expect(
       at("https://acme.example/careers", "<a href='/jobs/1'>Engineer</a>"),
+    ).toBeNull();
+  });
+
+  it("resolves Greenhouse's /v1/boards/{key} form and its keyless /embed path, Lever's /v0/postings/{key} form, and excludes Ashby's posting-api host segment", () => {
+    expect(
+      at("https://boards.greenhouse.io/v1/boards/acmecorp/jobs", "<p>x</p>"),
+    ).toEqual({ ats: "Greenhouse", key: "acmecorp" });
+    expect(
+      at("https://boards.greenhouse.io/embed/job_app", "<p>x</p>"),
+    ).toBeNull();
+    expect(
+      at("https://api.lever.co/v0/postings/acme-labs", "<p>x</p>"),
+    ).toEqual({ ats: "Lever", key: "acme-labs" });
+    expect(
+      at("https://api.ashbyhq.com/posting-api/job-board/acme", "<p>x</p>"),
     ).toBeNull();
   });
 });

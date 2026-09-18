@@ -44,6 +44,22 @@ describe("Phase 5 posting links and JSON-LD careers connector", () => {
     ]);
   });
 
+  it("strips utm and ref tracking parameters and respects the link cap", () => {
+    const html = `<a href="/jobs/1-role?utm_source=x&ref=y&keep=1">Role</a>`;
+    const links = collectPostingLinks(
+      html,
+      new URL("https://acme.example/careers"),
+    );
+    expect(links[0].href).toBe("https://acme.example/jobs/1-role?keep=1");
+    const many = Array.from(
+      { length: 5 },
+      (_, i) => `<a href="/jobs/${i}-role">Role ${i}</a>`,
+    ).join("");
+    expect(
+      collectPostingLinks(many, new URL("https://acme.example/careers"), 2),
+    ).toHaveLength(2);
+  });
+
   it("reads salary, remote type and applicant countries from JSON-LD", async () => {
     const html = posting(
       "7",
@@ -106,6 +122,81 @@ describe("Phase 5 posting links and JSON-LD careers connector", () => {
     await expect(connector.fetchJob(page.jobs[1])).rejects.toThrow(
       /no JobPosting/,
     );
+  });
+
+  it("does not list a posting link that duplicates an inline JSON-LD job", async () => {
+    const html =
+      posting("1") +
+      `<a href="/jobs/1">Director of Product</a><a href="/jobs/2">Other role</a>`;
+    const connector = createConnector("Careers", {
+      fetchImpl: routeFetch({
+        "https://acme.example/careers": () => new Response(html),
+      }),
+    });
+    const page = await connector.search({
+      board: "acme.example",
+      terms: [],
+      sourceUrl: "https://acme.example/careers",
+    });
+    expect(
+      page.jobs.filter((j) => j.url === "https://acme.example/jobs/1"),
+    ).toHaveLength(1);
+    expect(page.jobs.map((j) => j.url)).toContain(
+      "https://acme.example/jobs/2",
+    );
+  });
+
+  it("falls back to a single salary value, classifies employment type, and reads array-form location fields", async () => {
+    const html = posting(
+      "8",
+      `,"employmentType":["FULL_TIME","Contract"],
+       "jobLocation":[{"address":{"addressLocality":"Austin","addressRegion":"TX","addressCountry":{"name":"United States"}}}],
+       "applicantLocationRequirements":[{"name":"United States"},{"name":"Canada"}],
+       "baseSalary":{"@type":"MonetaryAmount","currency":"eur",
+         "value":{"@type":"QuantitativeValue","value":95000,"unitText":"month"}},
+       "hiringOrganization":{}`,
+    );
+    const [raw] = extractJsonLdJobs(html);
+    const query = {
+      board: "acme.example",
+      terms: [],
+      sourceUrl: "https://acme.example/careers",
+    };
+    const normalized = await createConnector("Careers", {
+      fetchImpl: routeFetch({
+        "https://acme.example/careers": () => new Response(html),
+      }),
+    }).normalize(raw, { query });
+    expect(normalized).toMatchObject({
+      salaryMin: 95000,
+      salaryMax: 95000,
+      salaryPeriod: "month",
+      currency: "EUR",
+      employmentType: "Contract",
+      company: "acme.example", // no hiringOrganization.name and no query.company: falls back to board
+    });
+    expect(normalized.location).toContain("Austin, TX");
+    expect(normalized.location).toContain("Applicants: United States, Canada");
+  });
+
+  it("reports an unrecognised currency as Unknown", async () => {
+    const html = posting(
+      "9",
+      `,"baseSalary":{"@type":"MonetaryAmount","currency":"XYZ","value":{"minValue":1,"maxValue":2}}`,
+    );
+    const [raw] = extractJsonLdJobs(html);
+    const normalized = await createConnector("Careers", {
+      fetchImpl: routeFetch({
+        "https://acme.example/careers": () => new Response(html),
+      }),
+    }).normalize(raw, {
+      query: {
+        board: "acme.example",
+        terms: [],
+        sourceUrl: "https://acme.example/careers",
+      },
+    });
+    expect(normalized.currency).toBe("Unknown");
   });
 
   it("recognises the new provider names", () => {
@@ -239,6 +330,58 @@ describe("Phase 5 crawler client and Browser connector", () => {
       { query },
     );
     expect(second.description).toContain("No description was captured");
+  });
+
+  it("wraps invalid JSON and unparseable error bodies as internal errors, and validates capture()", async () => {
+    const invalidJson = createHttpCrawlerClient({
+      url: "http://crawler:4000",
+      secret: "s",
+      fetchImpl: (async () => new Response("not json")) as typeof fetch,
+    });
+    await expect(
+      invalidJson.crawl({ url: "https://a.example/", maxPages: 1, maxJobs: 1 }),
+    ).rejects.toMatchObject({
+      kind: "internal",
+      message: "Crawler returned invalid JSON",
+    });
+    const opaqueError = createHttpCrawlerClient({
+      url: "http://crawler:4000",
+      secret: "s",
+      fetchImpl: (async () =>
+        new Response(JSON.stringify({ nope: 1 }), {
+          status: 500,
+        })) as typeof fetch,
+    });
+    await expect(
+      opaqueError.crawl({ url: "https://a.example/", maxPages: 1, maxJobs: 1 }),
+    ).rejects.toMatchObject({
+      kind: "internal",
+      message: "Crawler returned HTTP 500",
+    });
+    const client = createHttpCrawlerClient({
+      url: "http://crawler:4000",
+      secret: "s",
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            patterns: [
+              {
+                url: "https://acme.example/api/jobs",
+                method: "GET",
+                headers: {},
+                body: null,
+                jobsPath: "/jobs",
+                sample: [{}],
+              },
+            ],
+            warnings: [],
+          }),
+        )) as typeof fetch,
+    });
+    const captured = await client.capture({
+      url: "https://acme.example/careers",
+    });
+    expect(captured.patterns).toHaveLength(1);
   });
 
   it("fails loudly when the crawler is not configured", async () => {

@@ -12,6 +12,10 @@ import { registrableDomain } from "./seed-list";
 import { discoveryFetch, RobotsCache } from "./transport";
 import type { DiscoveryOptions } from "./resolver";
 
+const maxPages = 10;
+const maxJobs = 100;
+const maxAiCalls = 4;
+
 /** Every discovered URL is validated again by the pinned transport and robots policy. */
 export function createAdaptiveCareersConnector(
   options: DiscoveryOptions & { extractPage: ExtractPage },
@@ -34,7 +38,7 @@ export function createAdaptiveCareersConnector(
       let aiCalls = 0;
       let explicitEmpty = false;
       let jobCapReached = false;
-      while (queue.length && visited.size < 10 && cache.size < 100) {
+      while (queue.length && visited.size < maxPages && cache.size < maxJobs) {
         const url = new URL(queue.shift()!);
         if (visited.has(url.href)) continue;
         assertHttpsUrl(url);
@@ -63,7 +67,7 @@ export function createAdaptiveCareersConnector(
             `Read ${structured.length} structured job listings on page ${visited.size}.`,
           );
           for (const job of structured) {
-            if (cache.size >= 100) {
+            if (cache.size >= maxJobs) {
               jobCapReached = true;
               break;
             }
@@ -89,14 +93,14 @@ export function createAdaptiveCareersConnector(
           ) {
             nextUrls = careerLinks.slice(0, 3).map((link) => link.url.href);
           } else {
-            if (aiCalls >= 4) {
+            if (aiCalls >= maxAiCalls) {
               queue.unshift(url.href);
               break;
             }
             aiCalls++;
             await options.onProgress?.(
               "ai",
-              `AI is reading careers page ${visited.size} (call ${aiCalls} of 4).`,
+              `AI is reading careers page ${visited.size} (call ${aiCalls} of ${maxAiCalls}).`,
             );
             const extracted = await options.extractPage(
               evidence,
@@ -105,7 +109,7 @@ export function createAdaptiveCareersConnector(
             explicitEmpty ||= extracted.noOpenings;
             nextUrls = extracted.nextUrls;
             for (const job of extracted.jobs) {
-              if (cache.size >= 100) {
+              if (cache.size >= maxJobs) {
                 jobCapReached = true;
                 break;
               }
