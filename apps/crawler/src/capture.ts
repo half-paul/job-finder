@@ -6,6 +6,7 @@ import {
   type CaptureResponse,
 } from "@jobfinder/shared";
 import { withSession, type Session } from "./session";
+import { createWarningCollector, redactUrl } from "./warnings";
 
 const titleKey = /title|name|position/i;
 const urlKey = /url|link|href|permalink/i;
@@ -62,28 +63,6 @@ export function postingArrayPointer(
   return null;
 }
 
-/** Bounds `warnings` while a session is still live, not just at the end. */
-const maxWarnings = 50;
-/** Matches `captureResponseSchema`'s per-warning cap (`z.string().max(500)`). */
-const maxWarningLength = 500;
-
-/**
- * origin + pathname only, never the query string or fragment. Warning text
- * is not covered by `capturedHeaderAllowlist` — these are URLs of responses
- * that were deliberately NOT captured, so a `?token=…` on one of them must
- * not end up persisted in plain text anyway just because it was mentioned in
- * a warning instead of a captured pattern. `patterns[].url` is unaffected by
- * this: that URL is the thing being replayed and needs its query intact.
- */
-function warnUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return `${parsed.origin}${parsed.pathname}`;
-  } catch {
-    return url;
-  }
-}
-
 /**
  * Prunes any value nested past `maxPointerDepth`, replacing it with a short
  * placeholder. `sample` is stored on the captured pattern verbatim and later
@@ -119,24 +98,15 @@ export async function captureFromSession(
   origin: URL,
 ): Promise<CaptureResponse> {
   const patterns: CaptureResponse["patterns"] = [];
-  const warnings: string[] = [];
-  const warn = (message: string) => {
-    // Truncated here, centrally, so no template — this one or a future
-    // one — can ever push a warning past the schema's bound. I4 exists
-    // specifically to stop one bad input from destroying the whole batch;
-    // an unbounded warning about that very drop (built from the same
-    // attacker-controlled URL that made the pattern too big to keep) is
-    // that same failure mode wearing this channel instead.
-    if (warnings.length < maxWarnings)
-      warnings.push(message.slice(0, maxWarningLength));
-  };
+  const warnings = createWarningCollector();
+  const warn = warnings.push;
   // Reported once, not once per response after the cap: every later match is
   // dropped for the same reason and a warning per hit would just spend the
   // 50-warning budget on repeating itself.
   let patternCapWarned = false;
 
   session.onJsonSkip((url, reason) => {
-    warn(`Skipped a JSON response from ${warnUrl(url)}: ${reason}`);
+    warn(`Skipped a JSON response from ${redactUrl(url)}: ${reason}`);
   });
 
   session.onJsonResponse(async (request, body) => {
@@ -146,7 +116,7 @@ export async function captureFromSession(
     if (patterns.length >= 10) {
       if (!patternCapWarned) {
         warn(
-          `Stopped after 10 captured patterns; ${warnUrl(request.url)} and any further matches were not recorded`,
+          `Stopped after 10 captured patterns; ${redactUrl(request.url)} and any further matches were not recorded`,
         );
         patternCapWarned = true;
       }
@@ -187,7 +157,7 @@ export async function captureFromSession(
     });
     if (!parsed.success) {
       warn(
-        `Dropped a capture pattern for ${warnUrl(request.url)}: ${parsed.error.issues[0]?.message ?? "failed validation"}`,
+        `Dropped a capture pattern for ${redactUrl(request.url)}: ${parsed.error.issues[0]?.message ?? "failed validation"}`,
       );
       return;
     }
@@ -197,7 +167,7 @@ export async function captureFromSession(
   await session.open(origin);
   await session.settle();
 
-  return captureResponseSchema.parse({ patterns, warnings });
+  return captureResponseSchema.parse({ patterns, warnings: warnings.list() });
 }
 
 export async function runCapture(input: {

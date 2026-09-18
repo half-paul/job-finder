@@ -102,6 +102,12 @@ const readBody = (stream: IncomingMessage, limit = 64 * 1024) =>
 
 const server = createServer(async (req, res) => {
   const send = (status: number, payload: unknown) => {
+    // A prior call already wrote the head (e.g. `writeHead`/`end` itself
+    // threw after a successful `JSON.stringify`, and the caller's catch
+    // re-entered here via `fail()`). Writing headers twice throws
+    // `ERR_HTTP_HEADERS_SENT`, so once they're sent there is nothing left
+    // for this function to safely do.
+    if (res.headersSent) return;
     // Serialised BEFORE the head is written, deliberately: writing the
     // status line first and only then discovering the body can't be built
     // (a `RangeError` from stringifying something too deeply nested, in

@@ -181,8 +181,18 @@ describe("capture warnings", () => {
     // The same shape C1 exploited through postingArrayPointer's search, now
     // aimed at a field the search never looks at: a real title/url pair
     // sitting next to junk nested far past the stack's comfort zone.
+    //
+    // 50,000, not 5,000: Node 24's JSON.stringify survives 5,000 levels of
+    // nesting on its own (confirmed by review — reverting to the pre-fix
+    // `const sample = rawSample;` and rerunning this suite at depth 5,000
+    // left every test green, which proved nothing about the fix). 50,000 is
+    // past the point where JSON.stringify itself throws
+    // RangeError: Maximum call stack size exceeded on the raw, unbounded
+    // sample, which is what makes this test actually discriminate between
+    // the fixed and unfixed code instead of only exercising boundDepth's own
+    // recursion.
     let junk: unknown = "leaf";
-    for (let i = 0; i < 5000; i++) junk = { junk };
+    for (let i = 0; i < 50_000; i++) junk = { junk };
     const body = {
       data: {
         results: [
