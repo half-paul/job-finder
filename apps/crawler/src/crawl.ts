@@ -45,33 +45,46 @@ export async function runCrawl(input: CrawlRequest): Promise<CrawlResponse> {
         complete = false;
         break;
       }
-      let html: string;
+      // Extraction and schema validation are inside this try along with the
+      // fetch: `crawledJobSchema.parse` can throw on a single over-long
+      // title or JSON-LD description (extract.ts truncates neither), and
+      // that must skip this one posting with a warning, not abort the
+      // whole crawl as a 500 for an otherwise-successful run.
       try {
-        html = await session.open(url);
+        const html = await session.open(url);
+        const posting = extractPosting(html, url);
+        if (!posting) {
+          warnings.push(`No readable posting at ${url.href}`);
+          complete = false;
+          continue;
+        }
+        jobs.push(
+          crawledJobSchema.parse({
+            title: posting.title,
+            url: url.href,
+            location: posting.location,
+            description: posting.description,
+            postedAt: posting.postedAt,
+          }),
+        );
       } catch (error) {
-        if (error instanceof CrawlerFailure && error.kind === "captcha")
+        // A CAPTCHA ends the whole crawl: the site has declined automated
+        // access outright, and trying the next URL only invites another one.
+        // A spent session budget ("timeout") is exactly as unrecoverable —
+        // every remaining URL would fail the same way, so continuing would
+        // burn hundreds of dead iterations at maxJobs and, worse, bury the
+        // one warning that actually explains what happened once
+        // `warnings.slice(0, 50)` truncates the pile of copies.
+        if (
+          error instanceof CrawlerFailure &&
+          (error.kind === "captcha" || error.kind === "timeout")
+        )
           throw error;
         warnings.push(
           `Skipped ${url.href}: ${error instanceof Error ? error.message : "failed"}`,
         );
         complete = false;
-        continue;
       }
-      const posting = extractPosting(html, url);
-      if (!posting) {
-        warnings.push(`No readable posting at ${url.href}`);
-        complete = false;
-        continue;
-      }
-      jobs.push(
-        crawledJobSchema.parse({
-          title: posting.title,
-          url: url.href,
-          location: posting.location,
-          description: posting.description,
-          postedAt: posting.postedAt,
-        }),
-      );
     }
     return { jobs, complete, warnings: warnings.slice(0, 50) };
   });

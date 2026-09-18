@@ -30,7 +30,7 @@ function certificate() {
     "-subj",
     "/CN=localhost",
     "-addext",
-    "subjectAltName=DNS:localhost",
+    "subjectAltName=DNS:localhost,DNS:host.docker.internal",
     "-keyout",
     join(dir, "key.pem"),
     "-out",

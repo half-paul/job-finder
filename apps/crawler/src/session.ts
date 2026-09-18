@@ -1,4 +1,4 @@
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type BrowserContext } from "playwright";
 import {
   blockedResource,
   crawlerUserAgent,
@@ -47,23 +47,29 @@ export async function withSession<T>(
   hostLocks.set(host, gate);
   await previous;
 
-  const deadline = Date.now() + sessionBudgetMs;
-  const rules = await fetchRobots(origin);
-  const context = await (
-    await browser()
-  ).newContext({
-    userAgent: crawlerUserAgent(
-      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-    ),
-    javaScriptEnabled: true,
-    acceptDownloads: false,
-    httpCredentials: undefined,
-    // Test-only: the e2e fixture origin uses a self-signed certificate. Never
-    // set this in Compose or CI's deployed environment.
-    ignoreHTTPSErrors: process.env.CRAWLER_INSECURE_TLS === "1",
-  });
-  let lastLoad = 0;
+  // Everything from here on must be inside the try: fetchRobots routinely
+  // throws (a 401/403 robots.txt is an expected outcome, not an edge case),
+  // and anything that throws before the lock is held by a `finally` leaves
+  // `ours` unresolved forever — a permanent deadlock for this host, plus a
+  // permanent `hostLocks` entry the identity-guarded delete can never reach.
+  let context: BrowserContext | undefined;
   try {
+    const deadline = Date.now() + sessionBudgetMs;
+    const rules = await fetchRobots(origin);
+    context = await (
+      await browser()
+    ).newContext({
+      userAgent: crawlerUserAgent(
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+      ),
+      javaScriptEnabled: true,
+      acceptDownloads: false,
+      httpCredentials: undefined,
+      // Test-only: the e2e fixture origin uses a self-signed certificate. Never
+      // set this in Compose or CI's deployed environment.
+      ignoreHTTPSErrors: process.env.CRAWLER_INSECURE_TLS === "1",
+    });
+    let lastLoad = 0;
     await context.route("**/*", async (route) => {
       const request = route.request();
       let target: URL;
@@ -100,7 +106,14 @@ export async function withSession<T>(
             timeout: Math.max(1, Math.min(20_000, deadline - Date.now())),
           })
           .catch((error: Error) => {
-            throw new CrawlerFailure(error.message, "navigation");
+            // Playwright's own timeout (a slow page, not our budget check
+            // above) is identifiable by name; anything else is a genuine
+            // navigation failure (DNS, connection reset, etc). Getting this
+            // right matters: the per-posting loop in crawl.ts re-throws on
+            // "timeout" instead of treating it as a skippable posting.
+            const kind =
+              error.name === "TimeoutError" ? "timeout" : "navigation";
+            throw new CrawlerFailure(error.message, kind);
           });
         if (response && response.status() >= 400)
           throw new CrawlerFailure(
@@ -121,7 +134,10 @@ export async function withSession<T>(
     };
     return await run(session);
   } finally {
-    await context.close().catch(() => {});
+    // `context` may still be undefined here — e.g. fetchRobots or the
+    // browser launch threw before newContext ever ran — so this must be
+    // optional, not `context.close()`.
+    await context?.close().catch(() => {});
     release();
     // Only the last waiter's release should clear the map entry. If another
     // call arrived while we held the lock, it already replaced our `gate`
