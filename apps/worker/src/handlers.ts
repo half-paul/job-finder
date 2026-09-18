@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import {
   companyCandidates,
   companyWatchlists,
+  crawlPatterns,
   jobSources,
 } from "@jobfinder/db";
 import {
@@ -9,7 +10,10 @@ import {
   RobotsBlockedError,
   type DiscoveryOptions,
 } from "@jobfinder/discovery";
-import type { ConnectorOptions } from "@jobfinder/job-sources";
+import {
+  crawlerClientFromEnv,
+  type ConnectorOptions,
+} from "@jobfinder/job-sources";
 import type { ScanSchedule } from "@jobfinder/shared";
 import {
   cleanupExpired,
@@ -238,7 +242,11 @@ export async function runResolveCompanyJob(
   try {
     const resolution = await resolveCompanyWebsite(
       candidate.websiteUrl ?? `https://${candidate.domain}/`,
-      { ...options, onProgress: progress },
+      {
+        ...options,
+        onProgress: progress,
+        crawlerClient: options.crawlerClient ?? crawlerClientFromEnv(),
+      },
     );
     await db.transaction(async (tx) => {
       const [current] = await tx
@@ -287,6 +295,39 @@ export async function runResolveCompanyJob(
           },
         })
         .returning();
+      if (resolution.pattern)
+        // A CapturedApi source is useless without its replay pattern, so the
+        // pattern is written in the same transaction as the source row it
+        // belongs to: either both commit or neither does.
+        await tx
+          .insert(crawlPatterns)
+          .values({
+            sourceId: source.id,
+            kind: "http-json",
+            urlTemplate: resolution.pattern.urlTemplate,
+            method: resolution.pattern.method,
+            headers: resolution.pattern.headers,
+            body: resolution.pattern.body,
+            jobsPath: resolution.pattern.jobsPath,
+            fieldMap: resolution.pattern.fieldMap,
+          })
+          .onConflictDoUpdate({
+            target: crawlPatterns.sourceId,
+            // Re-resolution can discover a new request shape for the same
+            // source; replace the pattern rather than duplicate it, and clear
+            // verification/failure history since it applied to the old one.
+            set: {
+              urlTemplate: resolution.pattern.urlTemplate,
+              method: resolution.pattern.method,
+              headers: resolution.pattern.headers,
+              body: resolution.pattern.body,
+              jobsPath: resolution.pattern.jobsPath,
+              fieldMap: resolution.pattern.fieldMap,
+              discoveredAt: new Date(),
+              lastVerifiedAt: null,
+              failures: 0,
+            },
+          });
       if (candidate.sourceId === source.id && !source.enabled)
         // Our own source was parked by an earlier failure; a successful
         // re-resolution revives it. A source owned by a watchlist entry or
