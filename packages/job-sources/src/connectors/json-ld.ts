@@ -107,10 +107,15 @@ export function extractJsonLdJobs(html: string): JsonLdJob[] {
 
 export function jsonLdExternalId(job: JsonLdJob): string {
   const id = job.identifier;
-  if (typeof id === "string" || typeof id === "number") return String(id);
-  if (id && typeof id === "object" && id.value !== undefined)
-    return String(id.value);
-  return job.url;
+  const value =
+    typeof id === "string" || typeof id === "number"
+      ? String(id)
+      : id && typeof id === "object" && id.value !== undefined
+        ? String(id.value)
+        : "";
+  // A blank identifier is not an identity: without this fallback every posting
+  // that carries one would share a single external id and overwrite the others.
+  return value.trim() || job.url;
 }
 
 const toInt = (value: number | string | undefined) => {
