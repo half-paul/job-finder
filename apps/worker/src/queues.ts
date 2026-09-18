@@ -5,6 +5,7 @@ import { z } from "zod";
  * the handlers, so they live in one place.
  */
 export const queueNames = {
+  resolveCompany: "resolve-company",
   scanSource: "scan-source",
   scheduleSources: "schedule-sources",
   evaluateBatch: "evaluate-batch",
@@ -43,3 +44,9 @@ export const scanSingletonKey = (userId: string, sourceId: string) =>
   `scan:${userId}:${sourceId}`;
 
 export const evaluationSingletonKey = (userId: string) => `evaluate:${userId}`;
+
+export const resolveCompanyJobSchema = z.object({
+  userId: z.uuid(),
+  candidateId: z.uuid(),
+});
+export type ResolveCompanyJob = z.infer<typeof resolveCompanyJobSchema>;
