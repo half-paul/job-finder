@@ -135,6 +135,7 @@ describe("Phase 5 JSON-LD normalization", () => {
 import {
   createHttpCrawlerClient,
   crawlerClientFromEnv,
+  resolveCrawlerClient,
   type CrawlerClient,
 } from "@jobfinder/job-sources";
 
@@ -211,6 +212,28 @@ describe("Phase 5 crawler client and Browser connector", () => {
         CRAWLER_SECRET: "x",
       }),
     ).not.toBeNull();
+  });
+
+  describe("resolveCrawlerClient", () => {
+    const configuredEnv = { CRAWLER_URL: "http://c:4000", CRAWLER_SECRET: "x" };
+
+    // The bug this guards: `??` treats an explicit `null` the same as
+    // "not supplied" and silently falls back to the environment, so a caller
+    // (a test, or a source with no crawler entitlement) can never turn the
+    // browser rung off when the environment happens to have one configured.
+    it("keeps an explicit null even when the environment has a crawler", () => {
+      expect(resolveCrawlerClient(null, configuredEnv)).toBeNull();
+    });
+
+    it("falls back to the environment only when the option is absent", () => {
+      expect(resolveCrawlerClient(undefined, {})).toBeNull();
+      expect(resolveCrawlerClient(undefined, configuredEnv)).not.toBeNull();
+    });
+
+    it("passes an explicitly supplied client through untouched", () => {
+      const client = fakeCrawler([]);
+      expect(resolveCrawlerClient(client, configuredEnv)).toBe(client);
+    });
   });
 
   it("turns crawled postings into normalized jobs and flags incomplete walks", async () => {

@@ -105,3 +105,17 @@ export function crawlerClientFromEnv(
   if (!url || !secret) return null;
   return createHttpCrawlerClient({ url, secret });
 }
+
+/**
+ * Merges a caller-supplied crawler client with the environment default. An
+ * explicit `null` means the caller is telling us there is no crawler — e.g. a
+ * test disabling the browser rung — and must win over the environment; `??`
+ * cannot express that because it treats `null` and `undefined` the same. Only
+ * an absent (`undefined`) option falls back to `crawlerClientFromEnv`.
+ */
+export function resolveCrawlerClient(
+  explicit: CrawlerClient | null | undefined,
+  env: Record<string, string | undefined> = process.env,
+): CrawlerClient | null {
+  return explicit !== undefined ? explicit : crawlerClientFromEnv(env);
+}

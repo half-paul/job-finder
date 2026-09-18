@@ -11,7 +11,7 @@ import {
   type DiscoveryOptions,
 } from "@jobfinder/discovery";
 import {
-  crawlerClientFromEnv,
+  resolveCrawlerClient,
   type ConnectorOptions,
 } from "@jobfinder/job-sources";
 import type { ScanSchedule } from "@jobfinder/shared";
@@ -245,7 +245,7 @@ export async function runResolveCompanyJob(
       {
         ...options,
         onProgress: progress,
-        crawlerClient: options.crawlerClient ?? crawlerClientFromEnv(),
+        crawlerClient: resolveCrawlerClient(options.crawlerClient),
       },
     );
     await db.transaction(async (tx) => {

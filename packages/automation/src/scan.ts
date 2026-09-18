@@ -28,8 +28,8 @@ import {
 import { canonicalUrl, digest } from "@jobfinder/shared/hash";
 import {
   createConnector,
-  crawlerClientFromEnv,
   providerName,
+  resolveCrawlerClient,
   type ConnectorOptions,
   type JobReference,
   type NormalizedJob,
@@ -293,8 +293,9 @@ export async function scanSourceWithDb(
         : createConnector(provider, {
             ...options.connectorOptions,
             crawlPattern,
-            crawlerClient:
-              options.connectorOptions?.crawlerClient ?? crawlerClientFromEnv(),
+            crawlerClient: resolveCrawlerClient(
+              options.connectorOptions?.crawlerClient,
+            ),
             jsonLdAllowedHosts:
               options.connectorOptions?.jsonLdAllowedHosts ??
               (process.env.JSON_LD_ALLOWED_HOSTS ?? "")

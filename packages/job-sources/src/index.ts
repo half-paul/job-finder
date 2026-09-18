@@ -14,6 +14,7 @@ import {
 import {
   createHttpCrawlerClient,
   crawlerClientFromEnv,
+  resolveCrawlerClient,
   type CrawlerClient,
 } from "./crawler-client";
 import { parseXml } from "./xml";
@@ -353,6 +354,7 @@ export {
   createJobicyConnector,
   createHttpCrawlerClient,
   crawlerClientFromEnv,
+  resolveCrawlerClient,
 };
 export {
   extractJsonLdJobs,
