@@ -92,6 +92,26 @@ describe("crawler session enforcement", () => {
           .writeHead(302, { location: `https://${privateHost}:${port}/secret` })
           .end();
       if (path === "/plain") return html(`<h1>Staff Engineer</h1>`);
+      // The bounce-back chain: a public page's meta refresh lands on a
+      // redirect to the private host, which itself immediately bounces back
+      // to an entirely legitimate public page — all inside the networkidle
+      // window, before `page.url()` is ever read. `page.url()` at the end is
+      // public throughout; only the latch, which observed the private hop as
+      // it committed, has any record that it happened at all.
+      if (path === "/careers-bounceback")
+        return html(
+          `<meta http-equiv="refresh" content="0;url=/bounce-to-private">`,
+        );
+      if (path === "/bounce-to-private")
+        return res
+          .writeHead(302, {
+            location: `https://${privateHost}:${port}/bounce-home`,
+          })
+          .end();
+      if (path === "/bounce-home")
+        return html(
+          `<meta http-equiv="refresh" content="0;url=https://${publicHost}:${port}/plain">`,
+        );
       if (path === "/worker")
         return html(
           `<script>
@@ -168,6 +188,33 @@ describe("crawler session enforcement", () => {
       // The server did serve it — this is a read refusal, not a request
       // refusal, which is exactly what the report claims.
       expect(hits.some((hit) => hit.endsWith("/secret"))).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("refuses a private hop that bounces back to a public URL before the read", async () => {
+    // Pins the latch specifically: `page.url()` at the moment of the read is
+    // the public `/plain` page throughout, so a check of the settled URL
+    // alone — with no latch at all — would see nothing wrong and return that
+    // page's HTML. Only the latch, which recorded the private mid-chain hop
+    // as it committed, can still refuse this. Verified by mutation: with
+    // `latch.reset()`/`observe()` in `session.ts` short-circuited to no-ops,
+    // this test fails (the promise resolves instead of rejecting); restored,
+    // it passes.
+    const origin = new URL(`https://${publicHost}:${port}/careers`);
+    const { page, session } = await sessionFor(origin);
+    try {
+      const opened = session.open(
+        new URL(`https://${publicHost}:${port}/careers-bounceback`),
+      );
+      await expect(opened).rejects.toBeInstanceOf(CrawlerFailure);
+      const error = await opened.catch((raised: unknown) => raised);
+      expect(error).toMatchObject({ kind: "blocked" });
+      expect((error as CrawlerFailure).message).toContain(privateHost);
+      expect((error as CrawlerFailure).message).toContain(
+        "resolves to a non-public address",
+      );
     } finally {
       await page.close();
     }

@@ -78,19 +78,29 @@ export function createNavigationLatch(
 ): NavigationLatch {
   let refusal: HopRefusal | null = null;
   let pending: Promise<void> = Promise.resolve();
+  // Incremented by reset(). An observation started before a reset can still
+  // be awaiting `refuseHop` when the reset runs (DNS lookups are not
+  // cancellable — see `resolvesToPublicAddress`), so its callback captures
+  // the generation it belongs to and refuses to write into a later one. This
+  // is what makes `reset()` an actual boundary rather than just a hint: a
+  // refusal that resolves late is a refusal about the page that was already
+  // replaced, and must be discarded, not latched onto the new page.
+  let generation = 0;
   return {
     observe(href) {
       // `about:blank` carries no content and reaches no host; refusing it
       // would turn Playwright's own blank starting document into a policy
       // failure.
       if (href === "about:blank") return;
+      const mine = generation;
       pending = pending.then(async () => {
         if (refusal) return;
         const found = await refuseHop(href, origin, isPublic);
-        if (found && !refusal) refusal = found;
+        if (found && !refusal && mine === generation) refusal = found;
       });
     },
     reset() {
+      generation += 1;
       refusal = null;
       pending = Promise.resolve();
     },
@@ -152,13 +162,19 @@ export function createSession(deps: SessionDeps): Session {
         );
       if (!rules.allows(`${url.pathname}${url.search}`))
         throw new CrawlerFailure(`robots.txt disallows ${url.href}`, "blocked");
-      // Both of these hold state from the previous page load and must not
-      // leak into this one.
-      routeAbort.failure = null;
-      latch.reset();
       const wait = gap - (Date.now() - lastLoad);
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       lastLoad = Date.now();
+      // Both of these hold state from the previous page load and must not
+      // leak into this one. They are reset here, immediately before `goto`,
+      // with nothing in between: the politeness wait above is exactly the
+      // window in which a still-settling previous page (e.g. mid-redirect
+      // off-domain) can fire a stray `framenavigated`. Resetting before the
+      // wait would let that stray navigation latch a refusal that names the
+      // *previous* page's URL onto *this* page's session — refusing a
+      // legitimate page for someone else's redirect.
+      routeAbort.failure = null;
+      latch.reset();
       const response = await page
         .goto(url.href, {
           waitUntil: "domcontentloaded",
