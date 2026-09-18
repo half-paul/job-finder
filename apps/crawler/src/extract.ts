@@ -101,19 +101,72 @@ export function extractPosting(
 }
 
 /**
+ * Find a description container with balanced nesting, handling cases like
+ * <div class="description"><div>para 1</div><div>para 2</div></div>.
+ * Returns the inner HTML of the container, or null if not found.
+ */
+function findDescriptionContainer(html: string): string | null {
+  // Find opening tag of container: <(div|section|article) ... description ... >
+  const openPattern =
+    /<(div|section|article)\b[^>]*(class|id|data-[a-z-]+)=["'][^"']*description[^"']*["'][^>]*>/i;
+  const openMatch = openPattern.exec(html);
+  if (!openMatch) return null;
+
+  const tagName = openMatch[1];
+  const openEnd = openMatch.index + openMatch[0].length;
+
+  // Check if self-closing
+  if (openMatch[0].includes("/>")) return null;
+
+  // Walk forward with depth counter
+  let depth = 1;
+  let pos = openEnd;
+  const openTagPattern = new RegExp(`<${tagName}\\b[^>]*(?:/>|>)`, "gi");
+  const closeTagPattern = new RegExp(`</${tagName}>`, "gi");
+
+  while (pos < html.length && depth > 0) {
+    openTagPattern.lastIndex = pos;
+    closeTagPattern.lastIndex = pos;
+
+    const openMatch = openTagPattern.exec(html);
+    const closeMatch = closeTagPattern.exec(html);
+
+    // Determine which comes first
+    const nextOpen = openMatch?.index ?? Infinity;
+    const nextClose = closeMatch?.index ?? Infinity;
+
+    if (nextClose < nextOpen) {
+      depth--;
+      pos = nextClose + closeMatch![0].length;
+      if (depth === 0) {
+        return html.substring(openEnd, nextClose);
+      }
+    } else if (nextOpen < Infinity) {
+      // Check if it's self-closing
+      if (!openMatch![0].includes("/>")) {
+        depth++;
+      }
+      pos = nextOpen + openMatch![0].length;
+    } else {
+      // No more tags found
+      return null;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Extract description, trying containers in order:
  * 1. A container whose class, id, or data-* attribute contains "description"
  * 2. The contents of <main> or <article>
  * 3. The whole page with nav, header, footer stripped
  */
 function extractDescription(html: string): string {
-  // Try 1: Container with description in attribute
-  // Match: any tag with class/id/data-* containing "description" and its closing tag
-  const descriptionContainerPattern =
-    /<([a-z]+)\b[^>]+(?:class|id|data-[a-z-]+)=["'][^"']*description[^"']*["'][^>]*>([\s\S]*?)<\/\1>/i;
-  const descMatch = descriptionContainerPattern.exec(html);
-  if (descMatch?.[2]) {
-    return htmlToText(descMatch[2]);
+  // Try 1: Container with description in attribute (with balanced nesting)
+  const descContainer = findDescriptionContainer(html);
+  if (descContainer) {
+    return htmlToText(descContainer);
   }
 
   // Try 2: <main> or <article>

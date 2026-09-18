@@ -77,4 +77,35 @@ describe("crawler extraction", () => {
     expect(posting?.description).not.toContain("&apos;");
     expect(posting?.description).not.toContain("&amp;");
   });
+
+  it("tier 2: extracts from main tag when no description container exists", () => {
+    const posting = extractPosting(
+      fixture("tier-2-main.html"),
+      new URL("https://acme.example/careers/job/senior-eng-1"),
+    );
+    expect(posting?.description).toContain("architect scalable systems");
+    expect(posting?.description).toContain("distributed systems");
+    expect(posting?.description).not.toContain("Home");
+  });
+
+  it("tier 3: strips nav/header/footer when no container or main exists", () => {
+    const posting = extractPosting(
+      fixture("tier-3-no-container.html"),
+      new URL("https://acme.example/careers/job/marketing-1"),
+    );
+    expect(posting?.description).toContain("Lead our marketing team");
+    expect(posting?.description).toContain("drive growth initiatives");
+    expect(posting?.description).not.toContain("Home");
+    expect(posting?.description).not.toContain("Copyright");
+  });
+
+  it("handles nested same-tag markup within description container", () => {
+    const posting = extractPosting(
+      fixture("nested-description.html"),
+      new URL("https://acme.example/careers/job/pm-1"),
+    );
+    expect(posting?.description).toContain("Paragraph one");
+    expect(posting?.description).toContain("Paragraph two");
+    expect(posting?.description).toContain("Paragraph three");
+  });
 });
