@@ -235,10 +235,11 @@ describe("Phase 2 source connectors", () => {
     expect(retryAfterMs("not-a-date")).toBeUndefined();
   });
 
-  it("refuses to build a CapturedApi connector before replay is implemented", () => {
-    expect(() => createConnector("CapturedApi", {})).toThrow(
-      "Saved-API replay is not available yet",
-    );
+  it("builds a CapturedApi connector, which refuses to run without a saved pattern", async () => {
+    const connector = createConnector("CapturedApi", {});
+    await expect(
+      connector.search({ board: "acme", terms: [] }),
+    ).rejects.toThrow(/saved API pattern/i);
   });
 
   it("sends a captured pattern's method and body through the fetch transport", async () => {

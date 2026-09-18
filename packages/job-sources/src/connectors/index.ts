@@ -15,3 +15,4 @@ export { createWeWorkRemotelyConnector } from "./we-work-remotely";
 export { createWorkableConnector } from "./workable";
 export { createJobicyConnector } from "./jobicy";
 export { createBrowserConnector } from "./browser";
+export { createCapturedApiConnector } from "./captured-api";

@@ -93,6 +93,11 @@ export const crawlPatternSpecSchema = z.object({
 });
 export type CrawlPatternSpec = z.infer<typeof crawlPatternSpecSchema>;
 
+/** Renders a template string by replacing `{page}` with the given number. */
+export function renderTemplate(template: string, page: number): string {
+  return template.replace(/\{page\}/g, String(page));
+}
+
 /** RFC 6901 lookup. Empty pointer returns the document. */
 export function jsonPointerGet(value: unknown, pointer: string): unknown {
   if (pointer === "") return value;

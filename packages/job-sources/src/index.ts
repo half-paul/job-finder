@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import type { z } from "zod";
-import { jobInputSchema, maxSalary } from "@jobfinder/shared";
+import {
+  jobInputSchema,
+  maxSalary,
+  type CrawlPatternSpec,
+} from "@jobfinder/shared";
 import {
   fetchText,
   retryAfterMs,
@@ -95,6 +99,8 @@ export interface SourceConnector<RawJob = unknown> {
 export interface ConnectorOptions extends TransportOptions {
   jsonLdAllowedHosts?: string[];
   crawlerClient?: CrawlerClient | null;
+  /** The saved request a `CapturedApi` source replays. Null means unresolved. */
+  crawlPattern?: CrawlPatternSpec | null;
 }
 
 export const descriptionDigest = (value: string) =>
@@ -295,9 +301,7 @@ export function createConnector(
         "Careers sources are scanned through the discovery package, not createConnector.",
       );
     case "CapturedApi":
-      throw new Error(
-        "Saved-API replay is not available yet; see the captured-API entry in TODOS.md.",
-      );
+      return createCapturedApiConnector(options);
     case "Browser":
       return createBrowserConnector(options);
   }
@@ -307,6 +311,7 @@ import {
   createAdzunaConnector,
   createAshbyConnector,
   createBrowserConnector,
+  createCapturedApiConnector,
   createGreenhouseConnector,
   createHimalayasConnector,
   createJsonLdConnector,
@@ -328,6 +333,7 @@ export {
   createAdzunaConnector,
   createAshbyConnector,
   createBrowserConnector,
+  createCapturedApiConnector,
   createGreenhouseConnector,
   createHimalayasConnector,
   createJsonLdConnector,

@@ -167,7 +167,7 @@ export async function validatePattern(
   return { ok: true, count: postings.length };
 }
 
-/** Renders a template string by replacing `{page}` with the given number. */
-export function renderTemplate(template: string, page: number): string {
-  return template.replace(/{page}/g, String(page));
-}
+// `renderTemplate` is pure and belongs with the `CrawlPatternSpec` contract it
+// serves; it lives in @jobfinder/shared so the CapturedApi connector in
+// job-sources can use it without importing discovery.
+export { renderTemplate } from "@jobfinder/shared";

@@ -5,7 +5,9 @@ import {
   extractJsonLdJobs,
   normalizeJsonLdJob,
   providerName,
+  type ConnectorOptions,
 } from "@jobfinder/job-sources";
+import type { CrawlPatternSpec } from "@jobfinder/shared";
 
 const posting = (id: string, extra = "") => `
 <script type="application/ld+json">{
@@ -318,5 +320,128 @@ describe("Phase 5 crawler client and Browser connector", () => {
     ).rejects.toThrow(
       "Browser crawling is not configured; start the crawler service",
     );
+  });
+});
+
+const spec: CrawlPatternSpec = {
+  urlTemplate: "https://acme.example/api/jobs?page={page}",
+  method: "GET",
+  headers: { accept: "application/json" },
+  body: null,
+  jobsPath: "/data/results",
+  fieldMap: {
+    title: "/title",
+    url: "/absolute_url",
+    id: "/id",
+    location: "/location/name",
+    description: "/content",
+    postedAt: "/updated_at",
+  },
+};
+
+const pagedFetch = (pages: Record<string, unknown[]>): typeof fetch =>
+  (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input instanceof Request ? input.url : input));
+    const page = url.searchParams.get("page") ?? "1";
+    return new Response(
+      JSON.stringify({ data: { results: pages[page] ?? [] } }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+const capturedPosting = (id: number) => ({
+  id: String(id),
+  title: `Engineer ${id}`,
+  absolute_url: `https://acme.example/jobs/${id}`,
+  location: { name: "Vancouver, BC" },
+  content: "We are hiring an engineer to work on the thing.",
+  updated_at: "2026-09-01T00:00:00Z",
+});
+
+describe("CapturedApi connector", () => {
+  const options = (
+    extra: Partial<ConnectorOptions> = {},
+  ): ConnectorOptions => ({
+    crawlPattern: spec,
+    resolveHost: async () => [{ address: "93.184.216.34", family: 4 }],
+    ...extra,
+  });
+
+  it("walks pages until one comes back empty", async () => {
+    const connector = createConnector(
+      "CapturedApi",
+      options({
+        fetchImpl: pagedFetch({
+          "1": [capturedPosting(1), capturedPosting(2)],
+          "2": [capturedPosting(3)],
+        }),
+      }),
+    );
+    const page = await connector.search({
+      board: "acme",
+      terms: [],
+      company: "Acme",
+    });
+    expect(page.jobs.map((j) => j.externalId)).toEqual(["1", "2", "3"]);
+    expect(page.complete).toBe(true);
+    expect(page.canMarkRemovals).toBe(true);
+  });
+
+  it("maps a posting through the field map", async () => {
+    const connector = createConnector(
+      "CapturedApi",
+      options({ fetchImpl: pagedFetch({ "1": [capturedPosting(7)] }) }),
+    );
+    const page = await connector.search({
+      board: "acme",
+      terms: [],
+      company: "Acme",
+    });
+    const raw = await connector.fetchJob(page.jobs[0]);
+    const job = await connector.normalize(raw, {
+      query: { board: "acme", terms: [], company: "Acme" },
+    });
+    expect(job).toMatchObject({
+      title: "Engineer 7",
+      company: "Acme",
+      location: "Vancouver, BC",
+      jobUrl: "https://acme.example/jobs/7",
+      externalId: "7",
+      provider: "CapturedApi",
+    });
+  });
+
+  it("resolves a relative posting URL against the pattern origin", async () => {
+    const relative = { ...capturedPosting(9), absolute_url: "/jobs/9" };
+    const connector = createConnector(
+      "CapturedApi",
+      options({ fetchImpl: pagedFetch({ "1": [relative] }) }),
+    );
+    const page = await connector.search({
+      board: "acme",
+      terms: [],
+      company: "Acme",
+    });
+    expect(page.jobs[0].url).toBe("https://acme.example/jobs/9");
+  });
+
+  it("refuses to run without a saved pattern", async () => {
+    const connector = createConnector(
+      "CapturedApi",
+      options({ crawlPattern: null }),
+    );
+    await expect(
+      connector.search({ board: "acme", terms: [] }),
+    ).rejects.toThrow(/saved API pattern/i);
+  });
+
+  it("throws when a replay yields no parseable posting", async () => {
+    const connector = createConnector(
+      "CapturedApi",
+      options({ fetchImpl: pagedFetch({ "1": [{ nope: true }] }) }),
+    );
+    await expect(
+      connector.search({ board: "acme", terms: [], company: "Acme" }),
+    ).rejects.toThrow(/no parseable posting/i);
   });
 });
