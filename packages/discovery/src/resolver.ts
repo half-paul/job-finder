@@ -1,14 +1,17 @@
 import {
   extractJsonLdJobs,
+  type CrawlerClient,
   type TransportOptions,
 } from "@jobfinder/job-sources";
 import {
   isSupportedAts,
+  type CrawlPatternSpec,
   type PolicyCheck,
   type SupportedAts,
 } from "@jobfinder/shared";
 import { detectAts } from "./ats";
 import { findCareersPage, scoreCareersLinks } from "./careers";
+import { buildPatternSpec, validatePattern } from "./patterns";
 import { registrableDomain } from "./seed-list";
 import {
   discoveryFetch,
@@ -18,14 +21,20 @@ import {
 
 export interface DiscoveryOptions extends TransportOptions {
   onProgress?: (stage: string, message: string) => Promise<void>;
+  /** Null means the browser rung is unavailable; the resolver says so. */
+  crawlerClient?: CrawlerClient | null;
+  /** Injected in tests so pattern validation does not need a live replay. */
+  validateSpec?: typeof validatePattern;
 }
 export interface Resolution {
   careersUrl: string;
-  provider: SupportedAts | "Careers";
+  provider: SupportedAts | "Careers" | "CapturedApi" | "Browser";
   board: string;
-  strategy: "ats" | "json-ld" | "ai";
+  strategy: "ats" | "json-ld" | "captured-api" | "browser" | "ai";
   ats: string | null;
   policy: PolicyCheck;
+  /** Present only for `captured-api`; the caller persists it. */
+  pattern?: CrawlPatternSpec;
 }
 
 export async function resolveCompanyWebsite(
@@ -117,18 +126,97 @@ export async function resolveCompanyWebsite(
     };
   }
   const structured = extractJsonLdJobs(page.text).length > 0;
-  await options.onProgress?.(
-    "strategy",
-    structured
-      ? "Structured job listings found. Reading those before using AI."
-      : `${detection ? `${detection.ats} detected without a supported API connector. ` : "No supported job API detected. "}Using careers-page extraction with an AI fallback.`,
-  );
-  return {
-    careersUrl: page.finalUrl.href,
-    provider: "Careers",
-    board: input.hostname,
-    strategy: structured ? "json-ld" : "ai",
-    ats: detection?.ats ?? null,
-    policy,
-  };
+  if (structured) {
+    await options.onProgress?.(
+      "strategy",
+      "Structured job listings found. Reading those before using AI.",
+    );
+    return {
+      careersUrl: page.finalUrl.href,
+      provider: "Careers",
+      board: input.hostname,
+      strategy: "json-ld",
+      ats: detection?.ats ?? null,
+      policy,
+    };
+  }
+
+  const detected = detection
+    ? `${detection.ats} detected without a supported API connector. `
+    : "No supported job API detected. ";
+  const crawler = options.crawlerClient;
+  if (!crawler) {
+    await options.onProgress?.(
+      "strategy",
+      `${detected}The crawler service is not configured, so the cheaper captured-API and browser rungs were skipped. Using careers-page extraction with an AI fallback.`,
+    );
+    return {
+      careersUrl: page.finalUrl.href,
+      provider: "Careers",
+      board: input.hostname,
+      strategy: "ai",
+      ats: detection?.ats ?? null,
+      policy,
+    };
+  }
+
+  const validate = options.validateSpec ?? validatePattern;
+  try {
+    await options.onProgress?.(
+      "capture",
+      "Watching the careers page for a job API it calls.",
+    );
+    const captured = await crawler.capture(
+      { url: page.finalUrl.href },
+      options.signal,
+    );
+    for (const candidate of captured.patterns) {
+      const spec = buildPatternSpec(candidate);
+      if (!spec) continue;
+      const verdict = await validate(spec, options);
+      if (!verdict.ok) continue;
+      await options.onProgress?.(
+        "strategy",
+        `Saved the job API this page calls; ${verdict.count} postings replayed without a browser.`,
+      );
+      return {
+        careersUrl: page.finalUrl.href,
+        provider: "CapturedApi",
+        board: input.hostname,
+        strategy: "captured-api",
+        ats: detection?.ats ?? null,
+        policy,
+        pattern: spec,
+      };
+    }
+    await options.onProgress?.(
+      "strategy",
+      `${detected}No replayable job API was found, so this board will be read with a browser.`,
+    );
+    return {
+      careersUrl: page.finalUrl.href,
+      provider: "Browser",
+      board: input.hostname,
+      strategy: "browser",
+      ats: detection?.ats ?? null,
+      policy,
+    };
+  } catch (error) {
+    // An unreachable or failing crawler must not cost a company its
+    // resolution: the AI rung already handles this page today.
+    await options.onProgress?.(
+      "strategy",
+      `${detected}The crawler service could not read this page (${
+        error instanceof Error ? error.message : "unknown error"
+      }), so it falls back to careers-page extraction with AI.`,
+    );
+    return {
+      careersUrl: page.finalUrl.href,
+      provider: "Careers",
+      board: input.hostname,
+      strategy: "ai",
+      ats: detection?.ats ?? null,
+      policy,
+    };
+  }
 }

@@ -9,6 +9,7 @@ import {
   jsonPointerGet,
   strategyLabel,
 } from "@jobfinder/shared";
+import { resolveCompanyWebsite } from "@jobfinder/discovery";
 
 describe("Phase 5 shared discovery contracts", () => {
   it("labels every candidate status in plain language", () => {
@@ -612,5 +613,75 @@ describe("Phase 5 discovery user agent", () => {
     expect(
       await robots.check(new URL("https://ua2.example/careers")),
     ).toMatchObject({ robotsAllowed: false, userAgent: "JobFinder/1.0" });
+  });
+});
+
+const listingHtml = `<html><body><a href="/careers">Careers</a></body></html>`;
+
+describe("resolver crawler rungs", () => {
+  const base = {
+    resolveHost: publicHost,
+    fetchImpl: routeFetch({
+      "https://plain.example/robots.txt": () =>
+        new Response("User-agent: *\nAllow: /\n"),
+      "https://plain.example/": () => new Response(listingHtml),
+      "https://plain.example/careers": () =>
+        new Response("<html><body>Roles load here</body></html>"),
+    }),
+  };
+
+  it("prefers a captured API over the browser and the AI rung", async () => {
+    const resolution = await resolveCompanyWebsite("https://plain.example/", {
+      ...base,
+      crawlerClient: {
+        crawl: async () => ({ jobs: [], complete: true, warnings: [] }),
+        capture: async () => ({
+          patterns: [
+            {
+              url: "https://plain.example/api/jobs?page=1",
+              method: "GET" as const,
+              headers: { accept: "application/json" },
+              body: null,
+              jobsPath: "/results",
+              sample: [
+                { title: "Engineer", url: "https://plain.example/jobs/1" },
+              ],
+            },
+          ],
+          warnings: [],
+        }),
+      },
+      validateSpec: async () => ({ ok: true as const, count: 1 }),
+    });
+    expect(resolution.strategy).toBe("captured-api");
+    expect(resolution.provider).toBe("CapturedApi");
+    expect(resolution.pattern?.urlTemplate).toBe(
+      "https://plain.example/api/jobs?page={page}",
+    );
+  });
+
+  it("falls back to the browser when nothing can be captured", async () => {
+    const resolution = await resolveCompanyWebsite("https://plain.example/", {
+      ...base,
+      crawlerClient: {
+        crawl: async () => ({ jobs: [], complete: true, warnings: [] }),
+        capture: async () => ({ patterns: [], warnings: [] }),
+      },
+    });
+    expect(resolution.strategy).toBe("browser");
+    expect(resolution.provider).toBe("Browser");
+  });
+
+  it("degrades to the AI rung and says so when no crawler is configured", async () => {
+    const stages: string[] = [];
+    const resolution = await resolveCompanyWebsite("https://plain.example/", {
+      ...base,
+      crawlerClient: null,
+      onProgress: async (stage, message) => {
+        stages.push(`${stage}:${message}`);
+      },
+    });
+    expect(resolution.strategy).toBe("ai");
+    expect(stages.join("\n")).toMatch(/crawler.*not configured/i);
   });
 });
