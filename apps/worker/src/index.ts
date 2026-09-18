@@ -72,7 +72,10 @@ async function main() {
   const db = getDb();
 
   await boss.createQueue(queueNames.resolveCompany, {
-    policy: "singleton",
+    // "stately" dedupes queued jobs as well as the running one. Under
+    // "singleton" the scheduler tick re-sent every pending candidate each
+    // minute and the backlog grew behind a wall of duplicates.
+    policy: "stately",
     retryLimit: 0,
     expireInSeconds: 600,
   });

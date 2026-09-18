@@ -199,6 +199,17 @@ export const preferencesSchema = z
       .min(0)
       .max(100_000_000)
       .default(250_000),
+    /**
+     * Careers extraction is charged separately from job evaluation. Sharing
+     * one budget let a large import spend the evaluation allowance and start
+     * returning 429 for the scoring the workspace exists to do.
+     */
+    aiDiscoveryBudgetMicros: z
+      .number()
+      .int()
+      .min(0)
+      .max(100_000_000)
+      .default(250_000),
     ...automationPreferenceShape,
     weights: weightSchema,
   })
@@ -243,6 +254,7 @@ export const defaultPreferences: Preferences = {
     salary: false,
   },
   aiMonthlyBudgetMicros: 250_000,
+  aiDiscoveryBudgetMicros: 250_000,
   notificationsEnabled: true,
   notifyMinScore: 90,
   digestEnabled: false,

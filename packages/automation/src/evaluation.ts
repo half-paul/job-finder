@@ -3,7 +3,6 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import {
   getPool,
-  activityEvents,
   jobEmbeddings,
   jobMatches,
   jobReferences,
@@ -157,19 +156,12 @@ export async function evaluateJobWithDb(
         gte(jobMatches.evaluatedAt, monthStart()),
       ),
     );
-  const [discoverySpend] = await db
-    .select({
-      spent: sql<string>`coalesce(sum(${activityEvents.estimatedCostMicros}), 0)::bigint`,
-    })
-    .from(activityEvents)
-    .where(
-      and(
-        eq(activityEvents.userId, userId),
-        gte(activityEvents.createdAt, monthStart()),
-      ),
-    );
+  // Careers extraction is charged against aiDiscoveryBudgetMicros instead, so
+  // a large company import can no longer exhaust the evaluation allowance.
+  // This also drops a month-wide aggregate over activity_events from the
+  // per-job evaluation path.
   if (
-    Number(spend.spent) + Number(discoverySpend.spent) + estimatedCost >
+    Number(spend.spent) + estimatedCost >
     careerPreferences.aiMonthlyBudgetMicros
   )
     throw new AppError(

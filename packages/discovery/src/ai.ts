@@ -40,11 +40,25 @@ export function pageEvidence(url: URL, html: string) {
 }
 
 /** The model chooses only among observed links; it cannot issue requests or use tools. */
+export interface ExtractionUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export function createPageExtractor(options: {
   apiKey: string;
   model?: string;
   fetchImpl?: typeof fetch;
   beforeCall?: () => Promise<void>;
+  /**
+   * Reports what the call actually cost so a caller that reserved budget up
+   * front can settle it. Always runs once per call that reserved, including
+   * when the call failed, so nothing stays reserved for work never done.
+   */
+  afterCall?: (outcome: {
+    usage?: ExtractionUsage;
+    failed?: boolean;
+  }) => Promise<void>;
 }): ExtractPage {
   return async (input, signal) => {
     if (!options.apiKey)
@@ -52,6 +66,36 @@ export function createPageExtractor(options: {
         "AI careers extraction needs OPENAI_API_KEY in the worker environment.",
       );
     await options.beforeCall?.();
+    // Exactly one settlement per reserved call: a refusal reports the tokens
+    // it burned and then throws, and that must not settle twice.
+    let settled = false;
+    const settle = async (outcome: {
+      usage?: ExtractionUsage;
+      failed?: boolean;
+    }) => {
+      if (settled) return;
+      settled = true;
+      await options.afterCall?.(outcome);
+    };
+    try {
+      return await extract(options, settle, input, signal);
+    } catch (error) {
+      await settle({ failed: true });
+      throw error;
+    }
+  };
+}
+
+async function extract(
+  options: Parameters<typeof createPageExtractor>[0],
+  settle: (outcome: {
+    usage?: ExtractionUsage;
+    failed?: boolean;
+  }) => Promise<void>,
+  input: Parameters<ExtractPage>[0],
+  signal: Parameters<ExtractPage>[1],
+): Promise<PageExtraction> {
+  {
     const response = await (options.fetchImpl ?? fetch)(
       "https://api.openai.com/v1/chat/completions",
       {
@@ -119,8 +163,20 @@ export function createPageExtractor(options: {
             }),
           )
           .min(1),
+        usage: z
+          .object({
+            prompt_tokens: z.number().int().nonnegative(),
+            completion_tokens: z.number().int().nonnegative(),
+          })
+          .optional(),
       })
       .parse(await response.json());
+    await settle({
+      usage: envelope.usage && {
+        inputTokens: envelope.usage.prompt_tokens,
+        outputTokens: envelope.usage.completion_tokens,
+      },
+    });
     const choice = envelope.choices[0];
     if (
       choice.finish_reason !== "stop" ||
@@ -151,5 +207,5 @@ export function createPageExtractor(options: {
         "AI extraction returned information not supported by the page evidence.",
       );
     return result;
-  };
+  }
 }

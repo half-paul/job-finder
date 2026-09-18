@@ -474,7 +474,7 @@ test("AI discovery estimates are persisted and the monthly budget prevents anoth
   const pool = new Pool({ connectionString: databaseUrl });
   try {
     await pool.query(
-      "UPDATE career_preferences SET data=jsonb_set(data, '{aiMonthlyBudgetMicros}', '50000') WHERE user_id=$1",
+      "UPDATE career_preferences SET data=jsonb_set(data, '{aiDiscoveryBudgetMicros}', '50000') WHERE user_id=$1",
       [user.id],
     );
     let calls = 0;
@@ -509,7 +509,7 @@ test("AI discovery estimates are persisted and the monthly budget prevents anoth
       links: [],
     };
     await extract(input);
-    await expect(extract(input)).rejects.toThrow("monthly AI budget");
+    await expect(extract(input)).rejects.toThrow("monthly discovery budget");
     expect(calls).toBe(1);
     const entries = await listActivity(getDb(), user.id);
     expect(
@@ -699,78 +699,57 @@ test("two imported organizations with the same name but different domains do not
   }
 });
 
-test("AI evaluation counts discovery spend against the same monthly budget", async ({
+test("discovery spend is charged to its own budget, not the evaluation one", async ({
   request,
 }) => {
   const user = await register(request);
   const pool = new Pool({ connectionString: databaseUrl });
   try {
-    expect(
-      (
-        await request.put("/api/profile", {
-          headers,
-          data: {
-            name: "Budget check fixture",
-            summary:
-              "Technology executive focused on cloud transformation, security and responsible AI platforms.",
-            currentRole: "VP Infrastructure",
-            previousRoles: [],
-            yearsExperience: 20,
-            location: "Vancouver, Canada",
-            skills: ["Cloud architecture"],
-            industries: [],
-            certifications: [],
-            education: [],
-            languages: [],
-            workAuthorization: [],
-            leadershipExperience: "",
-            managementExperience: "",
-            companySizeExperience: [],
-            architectureExperience: "",
-          },
-        })
-      ).ok(),
-    ).toBe(true);
-    const job = await (
-      await request.post("/api/jobs", {
-        headers,
-        data: {
-          title: "VP Platform Engineering",
-          company: "Example Budget Inc.",
-          description:
-            "Lead cloud infrastructure and platform engineering for a growing SaaS company.",
-          location: "Vancouver, Canada",
-          country: "Canada",
-          industry: "SaaS",
-          employmentType: "Full-time",
-          seniority: "VP",
-          workType: "Remote",
-          salaryMin: null,
-          salaryMax: null,
-          salaryPeriod: "year",
-          currency: "CAD",
-          jobUrl: `https://example.test/careers/${randomUUID()}`,
-          postedAt: null,
-        },
-      })
-    ).json();
+    // A spent evaluation budget must not stop careers extraction, and the
+    // reservation must settle against the tokens the provider reports rather
+    // than keeping the flat estimate.
     await pool.query(
-      "UPDATE career_preferences SET data=jsonb_set(data, '{aiMonthlyBudgetMicros}', '10000') WHERE user_id=$1",
+      `UPDATE career_preferences SET data=jsonb_set(
+         jsonb_set(data, '{aiMonthlyBudgetMicros}', '1'),
+         '{aiDiscoveryBudgetMicros}', '250000') WHERE user_id=$1`,
       [user.id],
     );
-    // Simulate AI discovery having already reserved spend this month; the
-    // evaluation budget check must see it even though it never touched
-    // job_matches.
-    await pool.query(
-      `INSERT INTO activity_events (user_id, actor, stage, message, estimated_cost_micros)
-       VALUES ($1, 'Worker', 'ai-budget', 'fixture reservation', 20000)`,
-      [user.id],
+    const extract = discoveryExtractor(
+      getDb(),
+      user.id,
+      { actor: "Worker" },
+      {
+        apiKey: "fixture-key",
+        fetchImpl: (async () =>
+          Response.json({
+            choices: [
+              {
+                finish_reason: "stop",
+                message: {
+                  content: JSON.stringify({
+                    jobs: [],
+                    nextUrls: [],
+                    noOpenings: true,
+                  }),
+                },
+              },
+            ],
+            usage: { prompt_tokens: 1000, completion_tokens: 100 },
+          })) as typeof fetch,
+      },
     );
-    const response = await request.post(`/api/jobs/${job.id}/evaluate`, {
-      headers,
+    await extract({
+      url: "https://fixture.example/careers",
+      text: "There are no current openings.",
+      links: [],
     });
-    expect(response.status()).toBe(429);
-    expect(await response.text()).toContain("monthly AI budget");
+    const [reservation] = (await listActivity(getDb(), user.id)).filter(
+      (event) => event.stage === "ai-budget",
+    );
+    expect(reservation).toBeDefined();
+    // Settled from reported usage, so well under the 50,000 reserved.
+    expect(reservation.estimatedCostMicros).toBeGreaterThan(0);
+    expect(reservation.estimatedCostMicros).toBeLessThan(50_000);
   } finally {
     await cleanup(pool, user.id);
     await pool.end();
