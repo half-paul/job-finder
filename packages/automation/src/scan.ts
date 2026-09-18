@@ -1,7 +1,14 @@
+import {
+  createAdaptiveCareersConnector,
+  type ExtractPage,
+} from "@jobfinder/discovery";
+import { recordActivity } from "./activity";
+import { discoveryExtractor } from "./discovery-ai";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   getPool,
+  companyCandidates,
   jobReferences,
   jobSources,
   jobs,
@@ -44,6 +51,7 @@ export interface ScanSourceOptions {
   connectorOptions?: ConnectorOptions;
   /** Aborts in-flight provider requests when the worker is shutting down. */
   signal?: AbortSignal;
+  extractPage?: ExtractPage;
 }
 
 export type SearchRunRow = typeof searchRuns.$inferSelect;
@@ -156,17 +164,61 @@ export async function scanSourceWithDb(
     trigger,
   });
   const startedAt = Date.now();
+  const actor = trigger === "Schedule" ? "Worker" : "Application";
+  const progress = (stage: string, message: string) =>
+    recordActivity(db, {
+      userId,
+      sourceId,
+      runId: run.id,
+      actor,
+      stage,
+      message: `${source.company || source.provider}: ${message}`,
+    });
+  await progress(
+    "scan-start",
+    `Starting ${trigger.toLowerCase()} scan using ${source.provider}.`,
+  );
   try {
     const provider = providerName(source.provider);
-    const connector = createConnector(provider, {
-      ...options.connectorOptions,
-      jsonLdAllowedHosts:
-        options.connectorOptions?.jsonLdAllowedHosts ??
-        (process.env.JSON_LD_ALLOWED_HOSTS ?? "")
-          .split(",")
-          .map((host) => host.trim().toLowerCase())
-          .filter(Boolean),
-    });
+    if (provider === "Careers") {
+      const [approved] = await db
+        .select()
+        .from(companyCandidates)
+        .where(
+          and(
+            eq(companyCandidates.userId, userId),
+            eq(companyCandidates.sourceId, sourceId),
+            eq(companyCandidates.status, "Resolved"),
+          ),
+        );
+      if (!approved?.policyCheck?.robotsAllowed)
+        throw new AppError(
+          409,
+          "Company discovery must approve this careers source before scanning.",
+        );
+    }
+    const connector =
+      provider === "Careers"
+        ? createAdaptiveCareersConnector({
+            ...options.connectorOptions,
+            onProgress: progress,
+            extractPage:
+              options.extractPage ??
+              discoveryExtractor(db, userId, {
+                sourceId,
+                runId: run.id,
+                actor,
+              }),
+          })
+        : createConnector(provider, {
+            ...options.connectorOptions,
+            jsonLdAllowedHosts:
+              options.connectorOptions?.jsonLdAllowedHosts ??
+              (process.env.JSON_LD_ALLOWED_HOSTS ?? "")
+                .split(",")
+                .map((host) => host.trim().toLowerCase())
+                .filter(Boolean),
+          });
     const query = {
       board: source.board,
       terms: [],
@@ -180,6 +232,7 @@ export async function scanSourceWithDb(
             lastModified: source.lastModified ?? undefined,
           }
         : undefined;
+    await progress("fetch", "Requesting job listings.");
     let page = await connector.search(query, initialCursor, options.signal);
     const warnings: string[] = [];
     let canMarkRemovals = true;
@@ -195,6 +248,11 @@ export async function scanSourceWithDb(
       if (page.canMarkRemovals === false) canMarkRemovals = false;
       if (!page.notModified) {
         discovered += page.jobs.length;
+        await progress(
+          "page",
+          `Received ${page.jobs.length} listings; processing and applying keyword filters.`,
+        );
+        let processed = 0;
         for (const reference of page.jobs) {
           const fullReference: JobReference = {
             ...reference,
@@ -211,6 +269,10 @@ export async function scanSourceWithDb(
             // Previously imported listings therefore stay untouched.
             if (!keywordFilter(normalized, settings).passed) {
               filtered++;
+              await progress(
+                "filter",
+                `${normalized.title}: skipped by keyword filters.`,
+              );
               continue;
             }
             const result = await upsertDiscoveredJob(
@@ -221,7 +283,12 @@ export async function scanSourceWithDb(
             );
             if (result === "added") added++;
             if (result === "updated") updated++;
+            await progress("import", `${normalized.title}: ${result}.`);
           } catch (error) {
+            await progress(
+              "warning",
+              `${reference.externalId}: ${error instanceof Error ? error.message : "Could not read posting"}`,
+            );
             warnings.push(
               `${reference.externalId}: ${
                 error instanceof Error
@@ -229,9 +296,26 @@ export async function scanSourceWithDb(
                   : "could not normalize job"
               }`,
             );
+          } finally {
+            processed++;
+            if (processed % 10 === 0)
+              await db
+                .update(searchRuns)
+                .set({ discovered, added, updated, filtered })
+                .where(eq(searchRuns.id, run.id));
           }
         }
       }
+      await db
+        .update(searchRuns)
+        .set({
+          discovered,
+          added,
+          updated,
+          filtered,
+          warnings: warnings.slice(0, 100),
+        })
+        .where(eq(searchRuns.id, run.id));
       const complete = page.complete || page.notModified;
       if (!complete && (!cursor || seen.length >= maxJobs)) {
         return await finishRun(db, run.id, {
@@ -264,7 +348,7 @@ export async function scanSourceWithDb(
         : 0;
       if (!canMarkRemovals)
         warnings.push(
-          "This feed contains recent listings across employers. Missing listings are not marked removed.",
+          "This scan cannot prove the complete job inventory. Missing listings are not marked removed.",
         );
       await db
         .update(jobSources)
@@ -309,6 +393,15 @@ export async function scanSourceWithDb(
         error: error instanceof Error ? error.message : "Source scan failed",
       })
       .where(eq(searchRuns.id, run.id));
+    await recordActivity(db, {
+      userId,
+      sourceId,
+      runId: run.id,
+      actor,
+      stage: "scan-failed",
+      level: "error",
+      message: `${source.company}: ${error instanceof Error ? error.message : "Scan failed"}`,
+    });
     if (error instanceof AppError) throw error;
     throw new AppError(
       502,
@@ -381,6 +474,15 @@ async function finishRun(
     })
     .where(eq(searchRuns.id, id))
     .returning();
+  await recordActivity(db, {
+    userId: row.userId,
+    sourceId: row.sourceId,
+    runId: row.id,
+    actor: row.trigger === "Schedule" ? "Worker" : "Application",
+    stage: "scan-complete",
+    level: input.status === "Partial" ? "warning" : "info",
+    message: `${input.status}: ${row.discovered} found, ${row.added} added, ${row.updated} updated, ${row.filtered} filtered, ${row.removed} removed. ${row.warnings.join(" ")}`,
+  });
   return row;
 }
 

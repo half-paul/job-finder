@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import {
   getPool,
+  activityEvents,
   jobEmbeddings,
   jobMatches,
   jobReferences,
@@ -156,7 +157,21 @@ export async function evaluateJobWithDb(
         gte(jobMatches.evaluatedAt, monthStart()),
       ),
     );
-  if (spend.spent + estimatedCost > careerPreferences.aiMonthlyBudgetMicros)
+  const [discoverySpend] = await db
+    .select({
+      spent: sql<number>`coalesce(sum(${activityEvents.estimatedCostMicros}), 0)::int`,
+    })
+    .from(activityEvents)
+    .where(
+      and(
+        eq(activityEvents.userId, userId),
+        gte(activityEvents.createdAt, monthStart()),
+      ),
+    );
+  if (
+    spend.spent + discoverySpend.spent + estimatedCost >
+    careerPreferences.aiMonthlyBudgetMicros
+  )
     throw new AppError(
       429,
       "This evaluation would exceed your monthly AI budget. Increase the budget or wait for the next month.",

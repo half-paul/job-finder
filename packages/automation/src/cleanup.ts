@@ -1,5 +1,10 @@
 import { and, isNotNull, lt, sql } from "drizzle-orm";
-import { notifications, rateLimits, sessions } from "@jobfinder/db";
+import {
+  activityEvents,
+  notifications,
+  rateLimits,
+  sessions,
+} from "@jobfinder/db";
 import type { AutomationDb } from "./scan";
 
 export interface CleanupResult {
@@ -38,6 +43,9 @@ export async function cleanupExpired(
       ),
     )
     .returning({ id: notifications.id });
+  await db
+    .delete(activityEvents)
+    .where(lt(activityEvents.createdAt, notificationCutoff));
   return {
     sessions: sessionRows.length,
     rateLimits: rateRows.length,

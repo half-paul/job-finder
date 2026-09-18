@@ -1,5 +1,9 @@
 import { and, asc, eq } from "drizzle-orm";
-import { companyWatchlists, jobSources } from "@jobfinder/db";
+import {
+  companyCandidates,
+  companyWatchlists,
+  jobSources,
+} from "@jobfinder/db";
 import {
   AppError,
   watchlistInputSchema,
@@ -124,6 +128,14 @@ export async function deleteWatchlist(
       and(eq(companyWatchlists.id, id), eq(companyWatchlists.userId, userId)),
     );
   if (!existing) throw new AppError(404, "Watchlist entry not found.");
+  await db
+    .delete(companyCandidates)
+    .where(
+      and(
+        eq(companyCandidates.watchlistId, id),
+        eq(companyCandidates.userId, userId),
+      ),
+    );
   await db.delete(companyWatchlists).where(eq(companyWatchlists.id, id));
   // Disable rather than delete: imported provenance stays intact and the
   // scheduled scan stops without removing the user's listings.
@@ -140,7 +152,7 @@ export async function deleteWatchlist(
   return { id };
 }
 
-async function ensureWatchlistSource(
+export async function ensureWatchlistSource(
   db: AutomationDb,
   userId: string,
   input: WatchlistInput,

@@ -1,16 +1,14 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
-import { jobSources, preferences, searchRuns } from "@jobfinder/db";
+import { jobSources, searchRuns } from "@jobfinder/db";
 import {
   AppError,
   isGlobalSource,
-  preferencesSchema,
-  defaultPreferences,
   sourceInputSchema,
   sourceScheduleSchema,
   type ScanSchedule,
 } from "@jobfinder/shared";
 import { canonicalUrl } from "@jobfinder/shared/hash";
-import { applySchedule, nextRunFor } from "./schedule";
+import { applySchedule } from "./schedule";
 import { sourceIdentity, type AutomationDb } from "./scan";
 
 /**
@@ -121,23 +119,3 @@ const nextRunLabel = (
   schedule === "Manual" || !row.nextRunAt
     ? "Runs only when you sync"
     : `Next automatic run ${row.nextRunAt.toISOString()}`;
-
-/** The global feeds the interactive sync button walks when none is chosen. */
-export async function globalSources(db: AutomationDb, userId: string) {
-  const sources = await db
-    .select()
-    .from(jobSources)
-    .where(and(eq(jobSources.ownerId, userId), eq(jobSources.enabled, true)));
-  return sources.filter((source) => isGlobalSource(source.provider));
-}
-
-export async function automationPreferences(db: AutomationDb, userId: string) {
-  const [row] = await db
-    .select()
-    .from(preferences)
-    .where(eq(preferences.userId, userId));
-  return preferencesSchema.parse(row?.data ?? defaultPreferences);
-}
-
-export const nextScheduledRun = (schedule: ScanSchedule, from = new Date()) =>
-  nextRunFor(schedule, from);
