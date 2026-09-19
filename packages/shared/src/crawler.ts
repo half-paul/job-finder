@@ -32,9 +32,9 @@ export type CrawledJob = z.infer<typeof crawledJobSchema>;
  * So the bound is written here, from request arrival rather than from lock
  * acquisition, as an addition the compiler and the test suite can both see:
  *
- *     lock wait      15 s   how long a request will queue behind another
+ *     lock wait       5 s   how long a request will queue behind another
  *                           crawl of the same host before refusing
- *   + session budget 75 s   the wall clock `session.ts` hands `open()`
+ *   + session budget 85 s   the wall clock `session.ts` hands `open()`
  *   + session overrun 10 s  work that still runs after the deadline: the
  *                           last page's `networkidle` settle (5 s), its
  *                           content read and the context teardown
@@ -51,7 +51,7 @@ export type CrawledJob = z.infer<typeof crawledJobSchema>;
  * side fails the suite instead of shipping.
  *
  * The lock wait is deliberately short. It is not sized to let a queued
- * request actually get its turn — at a 75 s budget it usually will not —
+ * request actually get its turn — at an 85 s budget it usually will not —
  * because a fast, typed refusal is a better answer than a held connection:
  * the worker learns the host is busy, can retry later, and the user sees a
  * real reason instead of an abort with nothing attached.
@@ -67,7 +67,7 @@ export const crawlClientTimeoutMs = 120_000;
  * before refusing with `kind: "timeout"`. Counted from request arrival, not
  * from any later point — see `withSession` in `apps/crawler/src/session.ts`.
  */
-export const crawlLockWaitMs = 15_000;
+export const crawlLockWaitMs = 5_000;
 /**
  * Work that can still run after the session deadline has passed, because the
  * deadline is checked when a page load *starts*: the final page's
@@ -101,8 +101,10 @@ export const crawlTransportOverheadMs = 5_000;
  * 520 loads — is over half an hour of held browser context and host lock per
  * company, which no HTTP request in this system is willing to wait for.
  *
- * What that buys is roughly fourteen postings from a three-page walk. That
- * is a real limitation and it is stated rather than hidden: the browser rung
+ * What that buys is `crawlMaxJobs` postings from a `crawlMaxPages`-page
+ * walk — derived below, not restated here, so this comment cannot drift
+ * from the numbers again. That is a real limitation and it is stated rather
+ * than hidden: the browser rung
  * is the last resort for a small company with no ATS and no captured API,
  * where a careers page of a handful of roles across one to three pages is
  * the normal case. Anything larger should be reached by the captured-API rung,
@@ -111,7 +113,7 @@ export const crawlTransportOverheadMs = 5_000;
  * connector already sets `canMarkRemovals: false` unconditionally, so a
  * truncated view can never retire a posting.
  */
-export const crawlSessionBudgetMs = 75_000;
+export const crawlSessionBudgetMs = 85_000;
 /** Minimum interval between the *starts* of two page loads on one host. */
 export const crawlMinGapMs = 1_000;
 /**
@@ -138,7 +140,7 @@ export const crawlWorstCaseRequestMs =
 export const crawlTimeoutMarginMs =
   crawlClientTimeoutMs - crawlWorstCaseRequestMs;
 
-/** Page loads one session can complete inside its budget: 17. */
+/** Page loads one session can complete inside its budget: 20. */
 export const crawlLoadsPerSession = Math.floor(
   (crawlSessionBudgetMs - crawlSessionOverheadMs) /
     (crawlMinGapMs + crawlLoadCostMs),

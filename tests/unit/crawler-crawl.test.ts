@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   crawlClientTimeoutMs,
   crawlLoadCostMs,
-  crawlLockWaitMs,
   crawlLoadsPerSession,
   crawlMaxJobs,
   crawlMaxPages,
@@ -11,9 +10,7 @@ import {
   crawlResponseSchema,
   crawlSessionBudgetMs,
   crawlSessionOverheadMs,
-  crawlSessionOverrunMs,
   crawlTimeoutMarginMs,
-  crawlTransportOverheadMs,
   crawlWorstCaseRequestMs,
   type CrawlRequest,
 } from "@jobfinder/shared";
@@ -233,12 +230,11 @@ describe("the request's total time", () => {
     // `packages/shared/src/crawler.ts`, and the client reads its timeout
     // from there too, so an edit to either side fails here instead of
     // shipping.
-    expect(
-      crawlLockWaitMs +
-        crawlSessionBudgetMs +
-        crawlSessionOverrunMs +
-        crawlTransportOverheadMs,
-    ).toBe(crawlWorstCaseRequestMs);
+    // A real expected value, not a recomputation of the same formula the
+    // source uses to derive crawlWorstCaseRequestMs — that would just
+    // compare the sum to itself. This fails if any of the four inputs
+    // moves without a deliberate, conscious update here.
+    expect(crawlWorstCaseRequestMs).toBe(105_000);
     expect(crawlWorstCaseRequestMs).toBeLessThan(crawlClientTimeoutMs);
   });
 

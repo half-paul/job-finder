@@ -27,12 +27,15 @@ export const crawledExternalId = (job: CrawledJob) =>
 
 /**
  * Last rung of the ladder. One crawler session returns every posting it could
- * read within a single 90-second browser budget — three listing pages and
- * eighteen postings, which is what that budget buys at a one-second
- * politeness gap. A walk cut short by those caps, by a spent budget, or by a
- * listing page that would not load is reported as `complete: false`, and
- * `canMarkRemovals` is false regardless, so removals are never marked from a
- * partial view.
+ * read within a single browser session's wall-clock budget
+ * (`crawlSessionBudgetMs`, `packages/shared/src/crawler.ts`) — `maxPages`
+ * listing pages and `maxJobs` postings above, which is what that budget buys
+ * at the session's politeness gap between page loads. Those two caps, and
+ * the budget itself, are stated there rather than here so this comment
+ * cannot go stale the way an earlier version of it did. A walk cut short by
+ * those caps, by a spent budget, or by a listing page that would not load is
+ * reported as `complete: false`, and `canMarkRemovals` is false regardless,
+ * so removals are never marked from a partial view.
  */
 export function createBrowserConnector(
   options: ConnectorOptions = {},
