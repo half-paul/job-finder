@@ -17,15 +17,72 @@ export const crawledJobSchema = z.object({
 });
 export type CrawledJob = z.infer<typeof crawledJobSchema>;
 
+/**
+ * ## One browser session's budget, and the caps derived from it
+ *
+ * These numbers used to be chosen in two different places — the session
+ * budget and politeness gap in `apps/crawler/src/session.ts`, the page and
+ * job caps in `packages/job-sources/src/connectors/browser.ts` — and they
+ * contradicted each other outright: a 60 s budget with a 2 s gap allows ~28
+ * page loads, while the connector asked for 20 listing pages plus 500
+ * postings, i.e. up to 520 loads. Every crawl of a real board therefore ran
+ * the budget out, and the resulting fatal failure discarded the whole
+ * harvest. They are defined together here, with the arithmetic written down,
+ * so the two halves cannot disagree again; `session.ts` and `browser.ts`
+ * both import from this one place rather than restating a number.
+ *
+ * The reconciliation moves both ways. The gap comes down from 2 s to 1 s and
+ * the budget up from 60 s to 90 s, which is still comfortably inside the
+ * crawler client's 120 s request timeout (`crawler-client.ts`) so the client
+ * never aborts a session that would otherwise have finished. The caps then
+ * come *down* a long way to whatever that actually buys, because the
+ * alternative — a budget large enough for 520 loads — is over half an hour
+ * of held browser context and host lock per company, which no HTTP request
+ * in this system is willing to wait for.
+ *
+ * What that buys is roughly twenty postings from a three-page walk. That is
+ * a real limitation and it is stated rather than hidden: the browser rung is
+ * the last resort for a small company with no ATS and no captured API, where
+ * a careers page of a handful of roles across one to three pages is the
+ * normal case. Anything larger should be reached by the captured-API rung,
+ * which has no browser and no politeness gap and keeps its own 500-job cap.
+ * A walk that stops at these caps reports `complete: false`, and the browser
+ * connector already sets `canMarkRemovals: false` unconditionally, so a
+ * truncated view can never retire a posting.
+ */
+export const crawlSessionBudgetMs = 90_000;
+/** Minimum interval between the *starts* of two page loads on one host. */
+export const crawlMinGapMs = 1_000;
+/**
+ * What one load costs beyond the gap: `domcontentloaded` plus the
+ * `networkidle` settle a JS-rendered careers page needs. A median, not a
+ * worst case — the caps are a target, and the graceful truncation in
+ * `crawl.ts` is what handles a session that turns out slower than this.
+ */
+export const crawlLoadCostMs = 2_500;
+/** Budget spent before the first load: browser launch, robots.txt, teardown. */
+export const crawlSessionOverheadMs = 15_000;
+
+/** Page loads one session can complete inside its budget: 21. */
+export const crawlLoadsPerSession = Math.floor(
+  (crawlSessionBudgetMs - crawlSessionOverheadMs) /
+    (crawlMinGapMs + crawlLoadCostMs),
+);
+
+/** Listing pages to walk. Each one costs a load. */
+export const crawlMaxPages = 3;
+/** Postings to open. Each one costs a load; the listing walk gets the rest. */
+export const crawlMaxJobs = crawlLoadsPerSession - crawlMaxPages;
+
 export const crawlRequestSchema = z.object({
   url: httpsUrl,
-  maxPages: z.number().int().min(1).max(20).default(20),
-  maxJobs: z.number().int().min(1).max(500).default(500),
+  maxPages: z.number().int().min(1).max(crawlMaxPages).default(crawlMaxPages),
+  maxJobs: z.number().int().min(1).max(crawlMaxJobs).default(crawlMaxJobs),
 });
 export type CrawlRequest = z.infer<typeof crawlRequestSchema>;
 
 export const crawlResponseSchema = z.object({
-  jobs: z.array(crawledJobSchema).max(500),
+  jobs: z.array(crawledJobSchema).max(crawlMaxJobs),
   complete: z.boolean(),
   warnings: z.array(z.string().max(500)).max(50),
 });

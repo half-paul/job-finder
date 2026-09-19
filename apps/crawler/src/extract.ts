@@ -5,7 +5,131 @@ import {
 } from "@jobfinder/job-sources";
 import { hostAllowed } from "./policy";
 
-const anchorPattern = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+/**
+ * ## Why this file scans tags by hand instead of with `/<a\b[^>]*...>/g`
+ *
+ * Every pattern here used to be of the shape `<tag[^>]*...>`, run with `exec`
+ * or `replace` over a whole untrusted page. That shape is quadratic on
+ * adversarial input: at each of the ~n/2 positions where `<a` occurs, `[^>]*`
+ * runs to the end of the document looking for a `>` that is not there, then
+ * backtracks the whole way. Measured on `"<a"` repeats: 50 KB → 0.84 s,
+ * 100 KB → 3.15 s, 200 KB → 11.17 s, 400 KB → 40.65 s — clean n². The page
+ * cap is 8 MB (`session.ts`), so a single hostile careers page extrapolates
+ * to hours of a blocked event loop, and Node is single-threaded: that one
+ * page takes down every concurrent crawl and `/health` with it, and
+ * `restart: unless-stopped` does not restart a merely-unhealthy container.
+ *
+ * `scanTags` replaces all of them with one forward pass whose cursor only
+ * ever moves right, so the total work is linear in the document length no
+ * matter what the document contains. The regexes that remain run only
+ * against a single tag's source, which `maxTagLength` bounds, and only
+ * against quote-delimited attribute runs, so they cannot re-scan the page.
+ *
+ * `tests/unit/crawler-extract.test.ts` pins this with pathological inputs and
+ * a wall-clock assertion; if a future change reintroduces a page-wide
+ * `[^>]*`, that test is what will catch it.
+ */
+
+/** Longer than any real start tag; a `<` this far from its `>` is not markup. */
+const maxTagLength = 4096;
+/**
+ * A hard stop on the scan itself, independent of the linearity argument
+ * above. 8 MB of `<p>` is about 2.6 M tags, so this only bites on documents
+ * that are already pathological.
+ */
+const maxScannedTags = 300_000;
+/** Anchors considered on one page. A real listing has tens, not thousands. */
+const maxAnchors = 10_000;
+/** A posting URL longer than this is not one. */
+const maxHrefLength = 2_048;
+/** Anchor text kept for the `next` check; link labels are a few words. */
+const maxAnchorTextLength = 4_096;
+
+interface Tag {
+  /** Lowercased element name: `a`, `div`, `h1`. */
+  name: string;
+  /** True for a closing tag, `</a>`. */
+  closing: boolean;
+  selfClosing: boolean;
+  /** The tag's own source, `<a href="...">`, never longer than `maxTagLength`. */
+  source: string;
+  /** Index of the opening `<`. */
+  start: number;
+  /** Index just past the closing `>`. */
+  contentStart: number;
+}
+
+function isNameChar(code: number): boolean {
+  return (
+    (code >= 97 && code <= 122) || // a-z
+    (code >= 65 && code <= 90) || // A-Z
+    (code >= 48 && code <= 57) || // 0-9
+    code === 45 // -
+  );
+}
+
+/**
+ * Every tag in `html` from `from` onwards, in document order.
+ *
+ * The linearity guarantee rests on two facts, and any change here has to keep
+ * both. First, `pos` is assigned only from `indexOf` results that lie at or
+ * after it, so the cursor is monotonic and the `indexOf` scans together cover
+ * the document once. Second, an `indexOf` that returns -1 ends the scan
+ * rather than advancing by one and trying again: if there is no `>` left in
+ * the document then no later `<` can open a complete tag either, so there is
+ * nothing to be gained by looking, and looking is exactly what the old
+ * regexes did n/2 times over.
+ */
+function* scanTags(html: string, from = 0): Generator<Tag> {
+  let pos = from;
+  let scanned = 0;
+  while (pos < html.length) {
+    if (scanned >= maxScannedTags) return;
+    const start = html.indexOf("<", pos);
+    if (start < 0) return;
+    const end = html.indexOf(">", start + 1);
+    if (end < 0) return;
+    // Advanced before any `continue` below, so every path through the loop
+    // moves the cursor strictly right.
+    pos = end + 1;
+    scanned++;
+    // A `<` whose `>` is this far away is not a tag a browser would parse
+    // either; skipping to past the `>` matches how a real parser recovers.
+    if (end - start > maxTagLength) continue;
+    let i = start + 1;
+    const closing = html.charCodeAt(i) === 47; // "/"
+    if (closing) i++;
+    let j = i;
+    while (j < end && isNameChar(html.charCodeAt(j))) j++;
+    // `<` not followed by a name: a stray literal, a comment, a doctype.
+    if (j === i) continue;
+    yield {
+      name: html.slice(i, j).toLowerCase(),
+      closing,
+      selfClosing: html.charCodeAt(end - 1) === 47,
+      source: html.slice(start, end + 1),
+      start,
+      contentStart: end + 1,
+    };
+  }
+}
+
+/**
+ * The first closing tag matching `open`, ignoring nesting — the same thing
+ * the old lazy `[\s\S]*?</tag>` matched.
+ */
+function firstClose(html: string, open: Tag): Tag | null {
+  for (const tag of scanTags(html, open.contentStart))
+    if (tag.closing && tag.name === open.name) return tag;
+  return null;
+}
+
+/**
+ * Runs against one tag's source only (at most `maxTagLength` characters), so
+ * its `[^"'#]+` cannot scan the page. `href=` without a word boundary keeps
+ * the old pattern's behaviour, including its tolerance of `data-href=`.
+ */
+const hrefPattern = /href=["']([^"'#]+)["']/i;
 
 /** A posting path carries a slug plus a job word or a numeric id. */
 const postingPath =
@@ -15,12 +139,15 @@ const postingPath =
 export function postingLinks(html: string, base: URL): URL[] {
   const seen = new Set<string>();
   const links: URL[] = [];
-  anchorPattern.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = anchorPattern.exec(html))) {
+  let anchors = 0;
+  for (const tag of scanTags(html)) {
+    if (tag.closing || tag.name !== "a") continue;
+    if (++anchors > maxAnchors) break;
+    const raw = hrefPattern.exec(tag.source)?.[1];
+    if (!raw || raw.length > maxHrefLength) continue;
     let href: URL;
     try {
-      href = new URL(match[1], base);
+      href = new URL(raw, base);
     } catch {
       continue;
     }
@@ -42,16 +169,29 @@ const nextMarkers = [/rel=["']next["']/i];
  * session clicks it rather than navigating, so it is not a page link.
  */
 export function nextPageLink(html: string, base: URL): URL | null {
-  anchorPattern.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = anchorPattern.exec(html))) {
-    const tag = match[0];
-    const text = htmlToText(match[2]).toLowerCase();
+  let anchors = 0;
+  for (const tag of scanTags(html)) {
+    if (tag.closing || tag.name !== "a") continue;
+    if (++anchors > maxAnchors) break;
+    const raw = hrefPattern.exec(tag.source)?.[1];
+    if (!raw || raw.length > maxHrefLength) continue;
+    // A bounded window rather than `firstClose`: an anchor that is never
+    // closed would otherwise make this scan to the end of the document, once
+    // per anchor, which is the very shape this file exists to avoid. A link
+    // label is a few words, and the only thing read from it is
+    // `text === "next"`, so 4 KB is already far more than enough.
+    const window = html.slice(
+      tag.contentStart,
+      tag.contentStart + maxAnchorTextLength,
+    );
+    const closeAt = window.search(/<\/a\b/i);
+    const inner = closeAt < 0 ? window : window.slice(0, closeAt);
     const isNext =
-      nextMarkers.some((marker) => marker.test(tag)) || text === "next";
+      nextMarkers.some((marker) => marker.test(tag.source)) ||
+      htmlToText(inner).toLowerCase() === "next";
     if (!isNext) continue;
     try {
-      const href = new URL(match[1], base);
+      const href = new URL(raw, base);
       href.hash = "";
       if (hostAllowed(href, base) && href.href !== base.href) return href;
     } catch {
@@ -61,9 +201,37 @@ export function nextPageLink(html: string, base: URL): URL | null {
   return null;
 }
 
-const titlePattern = /<h1\b[^>]*>([\s\S]*?)<\/h1>/i;
-const locationPattern =
-  /<[^>]+(?:class|id|data-[a-z-]+)=["'][^"']*location[^"']*["'][^>]*>([\s\S]*?)<\//i;
+/** Matched against one tag's source, never the page. */
+const locationAttr = /(?:class|id|data-[a-z-]+)=["'][^"']*location[^"']*["']/i;
+const descriptionAttr =
+  /(?:class|id|data-[a-z-]+)=["'][^"']*description[^"']*["']/i;
+
+/** Text of the first `<h1>`, or "". */
+function firstHeadingText(html: string): string {
+  for (const tag of scanTags(html)) {
+    if (tag.closing || tag.name !== "h1") continue;
+    const close = firstClose(html, tag);
+    if (!close) return "";
+    return htmlToText(html.slice(tag.contentStart, close.start));
+  }
+  return "";
+}
+
+/**
+ * Text of the first element whose class/id/data-* names a location, up to the
+ * next closing tag — the old pattern ended at a bare `<\/`, and a single
+ * `indexOf` reproduces that without re-scanning.
+ */
+function locationText(html: string): string {
+  for (const tag of scanTags(html)) {
+    if (tag.closing) continue;
+    if (!locationAttr.test(tag.source)) continue;
+    const end = html.indexOf("</", tag.contentStart);
+    if (end < 0) return "";
+    return htmlToText(html.slice(tag.contentStart, end));
+  }
+  return "";
+}
 
 /**
  * JSON-LD first, because it is the site's own structured answer. The DOM
@@ -90,11 +258,11 @@ export function extractPosting(
       postedAt: structured.datePosted ?? null,
     };
   }
-  const title = htmlToText(titlePattern.exec(html)?.[1] ?? "");
+  const title = firstHeadingText(html);
   if (!title) return null;
   return {
     title,
-    location: htmlToText(locationPattern.exec(html)?.[1] ?? ""),
+    location: locationText(html),
     description: extractDescription(html).slice(0, 20_000),
     postedAt: null,
   };
@@ -104,56 +272,80 @@ export function extractPosting(
  * Find a description container with balanced nesting, handling cases like
  * <div class="description"><div>para 1</div><div>para 2</div></div>.
  * Returns the inner HTML of the container, or null if not found.
+ *
+ * The depth walk used to re-`exec` two `<tag[^>]*>` patterns from `pos` on
+ * every iteration, which is the same n² shape as the anchor scan above
+ * (measured 200 KB of `"<div"` → 16.90 s). `scanTags` visits each tag once.
  */
 function findDescriptionContainer(html: string): string | null {
-  // Find opening tag of container: <(div|section|article) ... description ... >
-  const openPattern =
-    /<(div|section|article)\b[^>]*(class|id|data-[a-z-]+)=["'][^"']*description[^"']*["'][^>]*>/i;
-  const openMatch = openPattern.exec(html);
-  if (!openMatch) return null;
+  let open: Tag | null = null;
+  for (const tag of scanTags(html)) {
+    if (tag.closing) continue;
+    if (tag.name !== "div" && tag.name !== "section" && tag.name !== "article")
+      continue;
+    if (!descriptionAttr.test(tag.source)) continue;
+    // A self-closing container has no contents to return.
+    if (tag.selfClosing) return null;
+    open = tag;
+    break;
+  }
+  if (!open) return null;
 
-  const tagName = openMatch[1];
-  const openEnd = openMatch.index + openMatch[0].length;
-
-  // Check if self-closing
-  if (openMatch[0].includes("/>")) return null;
-
-  // Walk forward with depth counter
   let depth = 1;
-  let pos = openEnd;
-  const openTagPattern = new RegExp(`<${tagName}\\b[^>]*(?:/>|>)`, "gi");
-  const closeTagPattern = new RegExp(`</${tagName}>`, "gi");
-
-  while (pos < html.length && depth > 0) {
-    openTagPattern.lastIndex = pos;
-    closeTagPattern.lastIndex = pos;
-
-    const openMatch = openTagPattern.exec(html);
-    const closeMatch = closeTagPattern.exec(html);
-
-    // Determine which comes first
-    const nextOpen = openMatch?.index ?? Infinity;
-    const nextClose = closeMatch?.index ?? Infinity;
-
-    if (nextClose < nextOpen) {
+  for (const tag of scanTags(html, open.contentStart)) {
+    if (tag.name !== open.name) continue;
+    if (tag.closing) {
       depth--;
-      pos = nextClose + closeMatch![0].length;
-      if (depth === 0) {
-        return html.substring(openEnd, nextClose);
-      }
-    } else if (nextOpen < Infinity) {
-      // Check if it's self-closing
-      if (!openMatch![0].includes("/>")) {
-        depth++;
-      }
-      pos = nextOpen + openMatch![0].length;
-    } else {
-      // No more tags found
-      return null;
+      if (depth === 0) return html.slice(open.contentStart, tag.start);
+    } else if (!tag.selfClosing) {
+      depth++;
     }
   }
-
   return null;
+}
+
+/** Contents of the first `<main>` or `<article>`, or null. */
+function mainContent(html: string): string | null {
+  for (const tag of scanTags(html)) {
+    if (tag.closing) continue;
+    if (tag.name !== "main" && tag.name !== "article") continue;
+    const close = firstClose(html, tag);
+    if (!close) return null;
+    return html.slice(tag.contentStart, close.start);
+  }
+  return null;
+}
+
+const strippedElements = new Set(["nav", "header", "footer"]);
+
+/**
+ * Replaces each `<nav>`/`<header>`/`<footer>` element with a space. The old
+ * `.replace(/<nav\b[\s\S]*?<\/nav>/gi, " ")` chain was quadratic for the same
+ * reason everything else here was (200 KB of `"<nav"` → 14.97 s); this makes
+ * one pass and keeps the lazy, nesting-blind semantics the old chain had.
+ */
+function stripChrome(html: string): string {
+  const parts: string[] = [];
+  let copied = 0;
+  let cursor = 0;
+  for (;;) {
+    let open: Tag | null = null;
+    for (const tag of scanTags(html, cursor)) {
+      if (!tag.closing && strippedElements.has(tag.name)) {
+        open = tag;
+        break;
+      }
+    }
+    if (!open) break;
+    const close = firstClose(html, open);
+    if (!close) break;
+    parts.push(html.slice(copied, open.start), " ");
+    copied = close.contentStart;
+    cursor = copied;
+  }
+  if (copied === 0) return html;
+  parts.push(html.slice(copied));
+  return parts.join("");
 }
 
 /**
@@ -163,25 +355,13 @@ function findDescriptionContainer(html: string): string | null {
  * 3. The whole page with nav, header, footer stripped
  */
 function extractDescription(html: string): string {
-  // Try 1: Container with description in attribute (with balanced nesting)
   const descContainer = findDescriptionContainer(html);
-  if (descContainer) {
-    return htmlToText(descContainer);
-  }
+  if (descContainer) return htmlToText(descContainer);
 
-  // Try 2: <main> or <article>
-  const mainMatch =
-    /<(?:main|article)\b[^>]*>([\s\S]*?)<\/(?:main|article)>/i.exec(html);
-  if (mainMatch?.[1]) {
-    return htmlToText(mainMatch[1]);
-  }
+  const main = mainContent(html);
+  if (main) return htmlToText(main);
 
-  // Try 3: Whole page with nav, header, footer stripped
-  const stripped = html
-    .replace(/<nav\b[\s\S]*?<\/nav>/gi, " ")
-    .replace(/<header\b[\s\S]*?<\/header>/gi, " ")
-    .replace(/<footer\b[\s\S]*?<\/footer>/gi, " ");
-  return htmlToText(stripped);
+  return htmlToText(stripChrome(html));
 }
 
 /**

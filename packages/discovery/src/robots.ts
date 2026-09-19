@@ -100,3 +100,38 @@ export function robotsAllows(
   if (!best || best.allow) return { allowed: true };
   return { allowed: false, matchedRule: `Disallow: ${best.path}` };
 }
+
+/**
+ * The one content-type guard for robots.txt, shared by every fetcher of it:
+ * `RobotsCache` in `transport.ts` (the worker's pinned-DNS path) and
+ * `fetchRobots` in `apps/crawler/src/robots.ts` (the browser service's own
+ * `fetch`). It lives here, next to the parser, because a robots.txt body is
+ * only safe to hand to `parseRobots` once we know it really is one.
+ *
+ * Two copies of this check had already drifted — one spelled
+ * `/^\s*text\/plain\s*(;|$)/i`, the other `/^\s*text\/plain\b/i`, which
+ * accepts `text/plain-html` — and BOTH only ran `if (contentType)`, so a 200
+ * with no `Content-Type` header at all sailed past and was parsed as robots.
+ * An HTML storefront page parses to an empty ruleset, and an empty ruleset
+ * reads as allow-everything: exactly the hole the guard exists to close.
+ *
+ * A missing header is therefore a refusal, not a pass. Every other
+ * unverifiable robots outcome in this codebase already stops the run rather
+ * than assuming permission — 401/403, an over-size body, an unreachable
+ * host, too many redirects — and a response that will not say what it is is
+ * no more verifiable than those. Only 404/410 mean "there is no policy", and
+ * those are decided by the caller before this is ever reached.
+ *
+ * @returns a plain-language reason to refuse, or `null` if the body may be
+ * parsed as robots.txt.
+ */
+export function robotsContentTypeRefusal(
+  contentType: string | null | undefined,
+): string | null {
+  const declared = contentType?.trim() ?? "";
+  if (!declared)
+    return "the response carried no Content-Type header, so it cannot be confirmed as a robots.txt";
+  if (!/^text\/plain\s*(;|$)/i.test(declared))
+    return `unexpected content type ${declared}`;
+  return null;
+}

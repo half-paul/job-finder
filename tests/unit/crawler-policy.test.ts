@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
+import { robotsContentTypeRefusal } from "@jobfinder/discovery";
 import {
   blockedResource,
   crawlerUserAgent,
@@ -330,5 +332,51 @@ describe("crawler policy", () => {
       ).resolves.toBe(true);
       expect(tlsVerificationDisabled()).toBe(true);
     });
+  });
+});
+
+describe("robots.txt content-type guard", () => {
+  // One implementation, used by both fetchers. Two hand-written copies had
+  // already drifted — `packages/discovery/src/transport.ts` required
+  // `/^\s*text\/plain\s*(;|$)/i`, `apps/crawler/src/robots.ts` only
+  // `/^\s*text\/plain\b/i`, which accepts `text/plain-html` — and both ran
+  // under `if (contentType && ...)`, so a 200 with no Content-Type at all
+  // reached `parseRobots` and became an empty, i.e. permissive, ruleset.
+  it("accepts text/plain, with or without parameters", () => {
+    expect(robotsContentTypeRefusal("text/plain")).toBeNull();
+    expect(robotsContentTypeRefusal("text/plain; charset=utf-8")).toBeNull();
+    expect(robotsContentTypeRefusal("  Text/Plain ;charset=UTF-8")).toBeNull();
+  });
+
+  it("refuses a type that merely starts with text/plain", () => {
+    expect(robotsContentTypeRefusal("text/plain-html")).toMatch(
+      /unexpected content type/i,
+    );
+    expect(robotsContentTypeRefusal("text/html; charset=utf-8")).toMatch(
+      /unexpected content type/i,
+    );
+  });
+
+  it("refuses a response that declares no content type at all", () => {
+    for (const missing of [null, undefined, "", "   "])
+      expect(robotsContentTypeRefusal(missing)).toMatch(
+        /no Content-Type header/i,
+      );
+  });
+
+  it("is the only content-type check either robots fetcher performs", () => {
+    const sources = [
+      "apps/crawler/src/robots.ts",
+      "packages/discovery/src/transport.ts",
+    ].map((path) =>
+      readFileSync(new URL(`../../${path}`, import.meta.url), "utf8"),
+    );
+    for (const source of sources) {
+      expect(source).toContain("robotsContentTypeRefusal(");
+      // No local copy of the pattern left behind to drift again. Both files
+      // still send `Accept: text/plain`, which is why this looks for the
+      // regex-escaped spelling a pattern literal would use, not the string.
+      expect(source).not.toContain(String.raw`text\/plain`);
+    }
   });
 });

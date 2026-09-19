@@ -7,6 +7,7 @@ import type { PolicyCheck } from "@jobfinder/shared";
 import {
   parseRobots,
   robotsAllows,
+  robotsContentTypeRefusal,
   RobotsBlockedError,
   type RobotsRules,
 } from "./robots";
@@ -45,10 +46,15 @@ export class RobotsCache {
             // A robots.txt that redirects to a storefront homepage arrives here as
             // HTML. Parsing it yields an empty ruleset, which reads as allow-all —
             // the opposite of the safe answer for a policy we could not verify.
-            const contentType = response.headers.get("content-type") ?? "";
-            if (contentType && !/^\s*text\/plain\s*(;|$)/i.test(contentType))
+            // `robotsContentTypeRefusal` is shared with the crawler service's own
+            // fetcher so the two cannot drift again, and it treats a missing
+            // Content-Type as unverifiable rather than acceptable.
+            const refusal = robotsContentTypeRefusal(
+              response.headers.get("content-type"),
+            );
+            if (refusal)
               throw new Error(
-                `Cannot verify robots.txt for ${host}: unexpected content type ${contentType}.`,
+                `Cannot verify robots.txt for ${host}: ${refusal}.`,
               );
             return parseRobots(text);
           }

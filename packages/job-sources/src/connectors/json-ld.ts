@@ -75,17 +75,62 @@ export const jsonLdJobSchema = z.object({
 });
 export type JsonLdJob = z.infer<typeof jsonLdJobSchema>;
 
+/** Longer than any real `<script ...>` open tag. */
+const maxScriptTagLength = 4096;
+/** A page with more JSON-LD blocks than this is not a careers page. */
+const maxLdJsonBlocks = 1000;
+
+/**
+ * The body of each `<script type="application/ld+json">` block, in document
+ * order.
+ *
+ * This used to be one regex — `/<script\b[^>]*type=...[^>]*>([\s\S]*?)<\/script>/gi`
+ * — matched against the whole page. That is quadratic on untrusted input: on
+ * a document of `"<script"` repeated with no closing tag, `[^>]*` runs to the
+ * end of the page from every one of the ~n/7 opening positions. `extractPosting`
+ * in `apps/crawler/src/extract.ts` calls this first, on an unvetted careers
+ * page that may be up to the 8 MB page cap, in a single-threaded process that
+ * also answers `/health` — so this was an outright denial of service for one
+ * hostile page. See the sibling note on `stripElement` in `../index.ts`.
+ *
+ * Both cursors only move right, so the whole scan is linear in page length.
+ */
+function* ldJsonBlocks(html: string): Generator<string> {
+  const lower = html.toLowerCase();
+  let pos = 0;
+  let blocks = 0;
+  while (blocks < maxLdJsonBlocks) {
+    const start = lower.indexOf("<script", pos);
+    if (start < 0) return;
+    const nameEnd = start + "<script".length;
+    const after = lower.charCodeAt(nameEnd);
+    // The `\b` the old pattern had: `<scriptable>` is not a `<script>`.
+    if ((after >= 97 && after <= 122) || (after >= 48 && after <= 57)) {
+      pos = nameEnd;
+      continue;
+    }
+    const tagEnd = lower.indexOf(">", nameEnd);
+    // No `>` left anywhere means no later `<script` can be complete either.
+    if (tagEnd < 0) return;
+    pos = tagEnd + 1;
+    if (tagEnd - start > maxScriptTagLength) continue;
+    if (
+      !/type=["']application\/ld\+json["']/.test(lower.slice(start, tagEnd + 1))
+    )
+      continue;
+    const close = lower.indexOf("</script", pos);
+    if (close < 0) return;
+    blocks++;
+    yield html.slice(pos, close);
+    pos = close + "</script".length;
+  }
+}
+
 export function extractJsonLdJobs(html: string): JsonLdJob[] {
   const jobs: JsonLdJob[] = [];
-  const scripts =
-    html.match(
-      /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
-    ) ?? [];
-  for (const script of scripts) {
-    const match = script.match(/>([\s\S]*)<\/script>/i);
-    if (!match) continue;
+  for (const block of ldJsonBlocks(html)) {
     try {
-      const parsed: unknown = JSON.parse(match[1]);
+      const parsed: unknown = JSON.parse(block);
       const nodes = Array.isArray(parsed)
         ? parsed
         : parsed &&

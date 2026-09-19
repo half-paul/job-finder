@@ -346,14 +346,43 @@ describe("Phase 5 discovery transport", () => {
     ).rejects.toThrow(/unexpected content type/i);
   });
 
-  it("still accepts a robots.txt served without a content type", async () => {
+  it("refuses a robots.txt served with no content type at all", async () => {
+    // The previous version of this test asserted the opposite — and was
+    // vacuous: `new Response("...")` sets `content-type: text/plain` for you,
+    // so it never exercised the missing-header path it was named for. The
+    // header has to be deleted for the case to exist at all.
+    //
+    // A response that will not say what it is cannot be confirmed to be a
+    // robots.txt, and `parseRobots` turns anything that is not one into an
+    // empty ruleset, which reads as allow-everything. Every other
+    // unverifiable robots outcome here (401/403, over-size, unreachable,
+    // too many redirects) already stops the run; this one now does too.
     const fetchImpl = routeFetch({
-      "https://bare-robots.example/robots.txt": () =>
-        new Response("User-agent: *\nDisallow: /private\n", { status: 200 }),
+      "https://bare-robots.example/robots.txt": () => {
+        const response = new Response("User-agent: *\nDisallow: /private\n", {
+          status: 200,
+        });
+        response.headers.delete("content-type");
+        return response;
+      },
+    });
+    const robots = new RobotsCache({ fetchImpl, resolveHost: publicHost });
+    await expect(
+      robots.check(new URL("https://bare-robots.example/careers")),
+    ).rejects.toThrow(/no Content-Type header/i);
+  });
+
+  it("accepts text/plain with a charset parameter", async () => {
+    const fetchImpl = routeFetch({
+      "https://charset-robots.example/robots.txt": () =>
+        new Response("User-agent: *\nDisallow: /private\n", {
+          status: 200,
+          headers: { "content-type": " Text/Plain; charset=utf-8" },
+        }),
     });
     const robots = new RobotsCache({ fetchImpl, resolveHost: publicHost });
     const check = await robots.check(
-      new URL("https://bare-robots.example/careers"),
+      new URL("https://charset-robots.example/careers"),
     );
     expect(check.robotsAllowed).toBe(true);
   });

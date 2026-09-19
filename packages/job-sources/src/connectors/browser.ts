@@ -1,4 +1,9 @@
-import { jobInputSchema, type CrawledJob } from "@jobfinder/shared";
+import {
+  crawlMaxJobs,
+  crawlMaxPages,
+  jobInputSchema,
+  type CrawledJob,
+} from "@jobfinder/shared";
 import { canonicalUrl } from "@jobfinder/shared/hash";
 import {
   descriptionDigest,
@@ -7,16 +12,27 @@ import {
   type SourceConnector,
 } from "../index";
 
-const maxPages = 20;
-const maxJobs = 500;
+/**
+ * Not chosen here. Both are derived from the crawler's session budget and
+ * politeness gap in `packages/shared/src/crawler.ts`, which is the only
+ * place that knows how many page loads one session can actually complete.
+ * Asking for more than that used to guarantee the session ran out of budget
+ * mid-crawl on any real board.
+ */
+const maxPages = crawlMaxPages;
+const maxJobs = crawlMaxJobs;
 
 export const crawledExternalId = (job: CrawledJob) =>
   job.id?.trim() || canonicalUrl(job.url);
 
 /**
  * Last rung of the ladder. One crawler session returns every posting it could
- * read; an incomplete walk (page or job cap) is reported so removals are never
- * marked from a partial view.
+ * read within a single 90-second browser budget — three listing pages and
+ * eighteen postings, which is what that budget buys at a one-second
+ * politeness gap. A walk cut short by those caps, by a spent budget, or by a
+ * listing page that would not load is reported as `complete: false`, and
+ * `canMarkRemovals` is false regardless, so removals are never marked from a
+ * partial view.
  */
 export function createBrowserConnector(
   options: ConnectorOptions = {},

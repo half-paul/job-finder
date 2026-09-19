@@ -16,6 +16,7 @@ import {
   resolvesToPublicAddress,
   type HopRefusal,
 } from "./policy";
+import { crawlMinGapMs, crawlSessionBudgetMs } from "@jobfinder/shared";
 import { CrawlerFailure } from "./failure";
 import { fetchRobots } from "./robots";
 
@@ -37,8 +38,14 @@ export function tlsVerificationDisabled(): boolean {
   return insecureModeAllowed() && process.env.CRAWLER_INSECURE_TLS === "1";
 }
 
-const sessionBudgetMs = 60_000;
-const defaultMinGapMs = 2_000;
+/**
+ * Both imported, not restated: the page/job caps the connector asks for are
+ * *derived* from these two numbers in `packages/shared/src/crawler.ts`, and
+ * the whole point of that file is that the budget and the caps cannot drift
+ * apart again. A local `const` here is how they drifted the first time.
+ */
+const sessionBudgetMs = crawlSessionBudgetMs;
+const defaultMinGapMs = crawlMinGapMs;
 /** Consistent with the connector transport's default (`packages/job-sources`). */
 const maxHtmlBytes = 8 * 1024 * 1024;
 /** A captured API response is a few pages of JSON, not a data export. */
@@ -299,9 +306,13 @@ export function createSession(deps: SessionDeps): Session {
     async open(url) {
       if (Date.now() > deadline)
         // fatal: the budget is spent for the whole session, not just this
-        // page — every remaining URL would fail the same way.
+        // page — every remaining URL would fail the same way. `fatal` means
+        // "stop opening pages", NOT "throw the harvest away": `crawl.ts`
+        // catches this, keeps what it already extracted and returns
+        // `complete: false`. A CAPTCHA is the one thing that still aborts
+        // outright, because that is a refusal rather than a truncation.
         throw new CrawlerFailure(
-          "Crawl session budget exhausted",
+          `Crawl session budget of ${Math.round(sessionBudgetMs / 1000)}s exhausted`,
           "timeout",
           true,
         );

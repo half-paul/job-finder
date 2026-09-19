@@ -3,6 +3,7 @@ import {
   discoveryUserAgent,
   parseRobots,
   robotsAllows,
+  robotsContentTypeRefusal,
 } from "@jobfinder/discovery";
 import { CrawlerFailure } from "./failure";
 import { refuseHop, resolvesToPublicAddress } from "./policy";
@@ -146,10 +147,17 @@ export async function fetchRobots(
       `Cannot verify robots.txt for ${origin.hostname}: HTTP ${response.status}`,
       "blocked",
     );
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType && !/^\s*text\/plain\b/i.test(contentType))
+  // Shared with `RobotsCache` in `packages/discovery/src/transport.ts` rather
+  // than spelled out again here: the two hand-written copies had already
+  // drifted (this one accepted `text/plain-html`) and both let a response with
+  // no Content-Type through to `parseRobots`, where it became an empty — that
+  // is, permissive — ruleset. One implementation, one answer.
+  const contentTypeRefusal = robotsContentTypeRefusal(
+    response.headers.get("content-type"),
+  );
+  if (contentTypeRefusal)
     throw new CrawlerFailure(
-      `Cannot verify robots.txt for ${origin.hostname}: unexpected content type ${contentType}`,
+      `Cannot verify robots.txt for ${origin.hostname}: ${contentTypeRefusal}`,
       "blocked",
     );
   const rules = parseRobots(await readCapped(response, origin.hostname));

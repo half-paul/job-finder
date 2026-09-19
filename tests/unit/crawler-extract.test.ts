@@ -159,3 +159,90 @@ describe("posting array detection", () => {
     expect(postingArrayPointer(nested)).toBeNull();
   });
 });
+
+describe("extraction on pathological HTML", () => {
+  const base = new URL("https://acme.example/careers");
+  /** The page cap `session.ts` enforces: what a hostile page may actually be. */
+  const pageCap = 8 * 1024 * 1024;
+  const repeatTo = (unit: string, bytes: number) =>
+    unit.repeat(Math.floor(bytes / unit.length));
+
+  /**
+   * Every scan in `extract.ts` used to be `/<tag[^>]*.../g` run over the whole
+   * document, which is quadratic on adversarial input: measured before the
+   * fix, `postingLinks` on `"<a"` repeats took 0.84 s at 50 KB, 3.15 s at
+   * 100 KB, 11.17 s at 200 KB and 40.65 s at 400 KB. At the 8 MB page cap
+   * that is hours of a blocked event loop — and the crawler is single
+   * threaded, so one hostile careers page denies every concurrent crawl and
+   * `/health` with it, which `restart: unless-stopped` will not recover.
+   *
+   * The budget below is deliberately loose (each case measured well under
+   * 0.2 s on a developer laptop after the fix, and the old code needed more
+   * than ten seconds at a fortieth of this input size). It is a guard against
+   * a reintroduced n², not a benchmark: anything quadratic blows straight
+   * through it, and ordinary machine-speed variation does not come close.
+   */
+  const budgetMs = 5_000;
+  const withinBudget = (label: string, run: () => void) => {
+    const started = Date.now();
+    run();
+    const elapsed = Date.now() - started;
+    expect(elapsed, `${label} took ${elapsed}ms`).toBeLessThan(budgetMs);
+  };
+
+  const cases: Array<[string, string]> = [
+    // Unterminated anchors: the original `anchorPattern` case.
+    ["unclosed anchors", repeatTo("<a", pageCap)],
+    // Anchors that do close, so every one is a real candidate.
+    [
+      "closed anchors",
+      repeatTo('<a href="/careers/job/eng-1234">Eng</a>', pageCap),
+    ],
+    // `findDescriptionContainer`'s depth walk, which re-exec'd from `pos`.
+    [
+      "unbalanced description container",
+      `<h1>Role</h1><div class="description">${repeatTo("<div", pageCap)}`,
+    ],
+    // The `<nav>/<header>/<footer>` strip in `extractDescription`.
+    ["unclosed nav elements", `<h1>Role</h1>${repeatTo("<nav", pageCap)}`],
+    [
+      "balanced nav elements",
+      `<h1>Role</h1>${repeatTo("<nav>x</nav>", pageCap)}`,
+    ],
+    // `titlePattern` and `locationPattern` had the same shape.
+    ["unclosed headings", repeatTo("<h1", pageCap)],
+    ["bare angle brackets", `<h1>Role</h1>${repeatTo("<", pageCap)}`],
+    // Reached through `htmlToText`, which was quadratic too.
+    ["unclosed script tags", `<h1>Role</h1>${repeatTo("<script", pageCap)}`],
+  ];
+
+  for (const [label, html] of cases) {
+    it(`completes postingLinks, nextPageLink and extractPosting on ${label} in bounded time`, () => {
+      withinBudget(`postingLinks/${label}`, () => {
+        postingLinks(html, base);
+      });
+      withinBudget(`nextPageLink/${label}`, () => {
+        nextPageLink(html, base);
+      });
+      withinBudget(`extractPosting/${label}`, () => {
+        extractPosting(html, base);
+      });
+    });
+  }
+
+  it("still reads a normal posting buried in 8MB of junk", () => {
+    const html = `<html><body><h1>Staff Engineer</h1>
+      <span class="location">Vancouver, BC</span>
+      <div class="description">A real role.</div>
+      ${repeatTo("<a", 1024 * 1024)}</body></html>`;
+    let posting: ReturnType<typeof extractPosting> = null;
+    withinBudget("extractPosting/mixed", () => {
+      posting = extractPosting(html, base);
+    });
+    expect(posting).toMatchObject({
+      title: "Staff Engineer",
+      location: "Vancouver, BC",
+      description: "A real role.",
+    });
+  });
+});

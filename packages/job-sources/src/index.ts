@@ -116,23 +116,76 @@ const entities: Record<string, string> = {
   quot: '"',
 };
 
+/**
+ * Removes `<name>...</name>` elements, lazily and blind to nesting — exactly
+ * what `/<name\b[\s\S]*?<\/name>/gi` matched, but in one forward pass.
+ *
+ * The regex form is quadratic on untrusted input: given `"<script"` repeated
+ * with no closing tag, every one of the ~n/7 opening positions expands
+ * `[\s\S]*?` to the end of the string before failing. Measured at 200 KB:
+ * 2.86 s, rising as n². `htmlToText` is on the crawler's hostile-input path
+ * (`apps/crawler/src/extract.ts` hands it a description container taken
+ * straight off an unvetted careers page), and the crawler is a single-
+ * threaded process serving `/health` from the same event loop.
+ *
+ * Both `indexOf` cursors only move right, so the total work is linear. A
+ * missing close tag ends the scan rather than advancing one character and
+ * looking again: if there is no `</script>` after this point there is none
+ * after any later point either.
+ */
+function stripElement(value: string, name: string): string {
+  const lower = value.toLowerCase();
+  const open = `<${name}`;
+  const close = `</${name}>`;
+  const parts: string[] = [];
+  let copied = 0;
+  let pos = 0;
+  for (;;) {
+    const start = lower.indexOf(open, pos);
+    if (start < 0) break;
+    // `\b` in the old pattern: `<scriptable>` is not a `<script>`.
+    const after = lower.charCodeAt(start + open.length);
+    if (
+      (after >= 97 && after <= 122) ||
+      (after >= 48 && after <= 57) ||
+      after === 45
+    ) {
+      pos = start + open.length;
+      continue;
+    }
+    const end = lower.indexOf(close, start + open.length);
+    if (end < 0) break;
+    parts.push(value.slice(copied, start), " ");
+    copied = end + close.length;
+    pos = copied;
+  }
+  if (copied === 0) return value;
+  parts.push(value.slice(copied));
+  return parts.join("");
+}
+
 export function htmlToText(value: string): string {
-  return value
-    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
-    .replace(/<\/(?:p|div|li|h[1-6]|tr)>/gi, "\n")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (match, code: string) => {
-      if (/^#x/i.test(code))
-        return String.fromCodePoint(Number.parseInt(code.slice(2), 16));
-      if (code.startsWith("#"))
-        return String.fromCodePoint(Number.parseInt(code.slice(1), 10));
-      return entities[code.toLowerCase()] ?? match;
-    })
-    .replace(/[ \t\u00a0]+/g, " ")
-    .replace(/\n\s+/g, "\n")
-    .trim();
+  return (
+    stripElement(stripElement(value, "script"), "style")
+      .replace(/<\/(?:p|div|li|h[1-6]|tr)>/gi, "\n")
+      .replace(/<br\s*\/?>/gi, "\n")
+      // `[^<>]+`, not `[^>]+`: on a run of `<` with no `>` the old class
+      // consumed to the end of the string from every one of the n positions
+      // and backtracked the whole way (200 KB → 14.69 s, n²), whereas this one
+      // fails after a single character compare. A tag cannot contain a raw `<`
+      // in valid markup, so well-formed input is stripped identically.
+      .replace(/<[^<>]+>/g, " ")
+      .replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (match, code: string) => {
+        if (/^#x/i.test(code))
+          return String.fromCodePoint(Number.parseInt(code.slice(2), 16));
+        if (code.startsWith("#"))
+          return String.fromCodePoint(Number.parseInt(code.slice(1), 10));
+        return entities[code.toLowerCase()] ?? match;
+      })
+      .replace(/[ \t\u00a0]+/g, " ")
+      .replace(/\n\s+/g, "\n")
+      .trim()
+  );
 }
 
 export function isoDate(value: string | null | undefined): string | null {

@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { crawlMaxJobs, crawlMaxPages } from "@jobfinder/shared";
 
 const crawlerUrl = process.env.CRAWLER_URL ?? "http://localhost:4000";
 const secret = process.env.CRAWLER_SECRET ?? "local-development-only";
@@ -136,7 +137,11 @@ test.describe("crawler service", () => {
   }) => {
     const response = await request.post(`${crawlerUrl}/crawl`, {
       headers: auth,
-      data: { url: `${origin}/careers`, maxPages: 20, maxJobs: 500 },
+      data: {
+        url: `${origin}/careers`,
+        maxPages: crawlMaxPages,
+        maxJobs: crawlMaxJobs,
+      },
     });
     expect(response.ok()).toBe(true);
     const body = await response.json();
@@ -153,7 +158,7 @@ test.describe("crawler service", () => {
   }) => {
     const response = await request.post(`${crawlerUrl}/crawl`, {
       headers: auth,
-      data: { url: `${origin}/careers`, maxPages: 1, maxJobs: 500 },
+      data: { url: `${origin}/careers`, maxPages: 1, maxJobs: crawlMaxJobs },
     });
     expect((await response.json()).complete).toBe(false);
   });
@@ -163,7 +168,11 @@ test.describe("crawler service", () => {
   }) => {
     const response = await request.post(`${crawlerUrl}/crawl`, {
       headers: auth,
-      data: { url: `${origin}/challenge`, maxPages: 20, maxJobs: 500 },
+      data: {
+        url: `${origin}/challenge`,
+        maxPages: crawlMaxPages,
+        maxJobs: crawlMaxJobs,
+      },
     });
     expect(response.status()).toBe(422);
     expect(await response.json()).toMatchObject({ kind: "captcha" });
