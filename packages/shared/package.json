@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./automation": "./src/automation.ts",
     "./hash": "./src/hash.ts"
   }
 }

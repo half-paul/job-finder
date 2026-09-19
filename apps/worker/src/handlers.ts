@@ -1,7 +1,25 @@
-import type { ConnectorOptions } from "@jobfinder/job-sources";
+import { and, eq } from "drizzle-orm";
+import {
+  companyCandidates,
+  companyWatchlists,
+  crawlPatterns,
+  jobSources,
+} from "@jobfinder/db";
+import {
+  resolveCompanyWebsite,
+  RobotsBlockedError,
+  type DiscoveryOptions,
+} from "@jobfinder/discovery";
+import {
+  resolveCrawlerClient,
+  type ConnectorOptions,
+} from "@jobfinder/job-sources";
 import type { ScanSchedule } from "@jobfinder/shared";
 import {
   cleanupExpired,
+  claimCompany,
+  sourceIdentity,
+  recordActivity,
   claimDueSources,
   digestDueUsers,
   evaluateSyncedJobs,
@@ -96,10 +114,22 @@ export async function runEvaluationJob(
   db: AutomationDb,
   job: { data: EvaluateBatchJob },
 ): Promise<EvaluationJobResult> {
+  await recordActivity(db, {
+    userId: job.data.userId,
+    actor: "Worker",
+    stage: "evaluation",
+    message: "Starting evaluation of new or changed listings.",
+  });
   const evaluation = await evaluateSyncedJobs(job.data.userId, {
     runIds: job.data.runIds,
   });
   const alerts = await recordMatchNotifications(job.data.userId, { db });
+  await recordActivity(db, {
+    userId: job.data.userId,
+    actor: "Worker",
+    stage: "evaluation-complete",
+    message: `${evaluation.evaluated} evaluated, ${evaluation.blocked} blocked, ${evaluation.failed} failed, ${alerts} in-app alerts. ${evaluation.errors.slice(0, 3).join(" ")}`,
+  });
   return {
     evaluated: evaluation.evaluated,
     blocked: evaluation.blocked,
@@ -135,6 +165,13 @@ export async function runScheduleTick(
       },
       scanSingletonKey(source.userId, source.sourceId),
     );
+    await recordActivity(db, {
+      userId: source.userId,
+      sourceId: source.sourceId,
+      actor: "Worker",
+      stage: "scan-queued",
+      message: "Scheduled scan queued.",
+    });
     enqueued++;
   }
   await recordState(db, schedulerHeartbeatKey, {
@@ -149,6 +186,7 @@ export interface HousekeepingResult {
   removedSessions: number;
   removedRateLimits: number;
   removedNotifications: number;
+  removedActivity: number;
   digests: number;
 }
 
@@ -164,12 +202,230 @@ export async function runHousekeeping(
   let digests = 0;
   for (const userId of await digestDueUsers(db, now)) {
     await generateDigest(userId, { db, windowHours: 24, now });
+    await recordActivity(db, {
+      userId,
+      actor: "Worker",
+      stage: "digest",
+      message: "Daily in-app digest generated.",
+    });
     digests++;
   }
   return {
     removedSessions: cleaned.sessions,
     removedRateLimits: cleaned.rateLimits,
     removedNotifications: cleaned.notifications,
+    removedActivity: cleaned.activity,
     digests,
   };
+}
+
+/** Refresh cadence for a source discovery created; the activity copy reads it. */
+const resolvedSourceSchedule = "Every 4 hours" as const;
+
+/** Candidate claims and final writes are fenced by attempt number, including after a worker restart. */
+export async function runResolveCompanyJob(
+  db: AutomationDb,
+  job: { data: { userId: string; candidateId: string } },
+  options: DiscoveryOptions = {},
+) {
+  const { userId, candidateId } = job.data;
+  const candidate = await claimCompany(db, userId, candidateId);
+  if (!candidate) return { skipped: true };
+  const progress = (stage: string, message: string) =>
+    recordActivity(db, {
+      userId,
+      candidateId,
+      actor: "Worker",
+      stage,
+      message: `${candidate.name}: ${message}`,
+    });
+  try {
+    const resolution = await resolveCompanyWebsite(
+      candidate.websiteUrl ?? `https://${candidate.domain}/`,
+      {
+        ...options,
+        onProgress: progress,
+        crawlerClient: resolveCrawlerClient(options.crawlerClient),
+      },
+    );
+    await db.transaction(async (tx) => {
+      const [current] = await tx
+        .select()
+        .from(companyCandidates)
+        .where(
+          and(
+            eq(companyCandidates.id, candidateId),
+            eq(companyCandidates.userId, userId),
+          ),
+        )
+        .for("update");
+      if (
+        !current ||
+        current.status !== "Resolving" ||
+        current.attempts !== candidate.attempts
+      )
+        return;
+      const values = {
+        ownerId: userId,
+        provider: resolution.provider,
+        board: resolution.board,
+        company: candidate.name,
+        sourceUrl: resolution.careersUrl,
+        identity: sourceIdentity({
+          provider: resolution.provider,
+          board: resolution.board,
+        }),
+        enabled: true,
+        schedule: resolvedSourceSchedule,
+        nextRunAt: new Date(),
+      };
+      const [source] = await tx
+        .insert(jobSources)
+        .values(values)
+        .onConflictDoUpdate({
+          target: [jobSources.ownerId, jobSources.identity],
+          // An existing row can belong to a watchlist entry or another
+          // candidate that resolved to the same board. Discovery may refresh
+          // where the source points, but never the choices its owner made:
+          // schedule, enabled and the company label stay as they were.
+          set: {
+            provider: values.provider,
+            board: values.board,
+            sourceUrl: values.sourceUrl,
+          },
+        })
+        .returning();
+      if (resolution.pattern)
+        // A CapturedApi source is useless without its replay pattern, so the
+        // pattern is written in the same transaction as the source row it
+        // belongs to: either both commit or neither does.
+        await tx
+          .insert(crawlPatterns)
+          .values({
+            sourceId: source.id,
+            kind: "http-json",
+            urlTemplate: resolution.pattern.urlTemplate,
+            method: resolution.pattern.method,
+            headers: resolution.pattern.headers,
+            body: resolution.pattern.body,
+            jobsPath: resolution.pattern.jobsPath,
+            fieldMap: resolution.pattern.fieldMap,
+          })
+          .onConflictDoUpdate({
+            target: crawlPatterns.sourceId,
+            // Re-resolution can discover a new request shape for the same
+            // source; replace the pattern rather than duplicate it, and clear
+            // verification/failure history since it applied to the old one.
+            set: {
+              urlTemplate: resolution.pattern.urlTemplate,
+              method: resolution.pattern.method,
+              headers: resolution.pattern.headers,
+              body: resolution.pattern.body,
+              jobsPath: resolution.pattern.jobsPath,
+              fieldMap: resolution.pattern.fieldMap,
+              discoveredAt: new Date(),
+              lastVerifiedAt: null,
+              failures: 0,
+            },
+          });
+      if (candidate.sourceId === source.id && !source.enabled)
+        // Our own source was parked by an earlier failure; a successful
+        // re-resolution revives it. A source owned by a watchlist entry or
+        // another candidate is left exactly as its owner configured it.
+        await tx
+          .update(jobSources)
+          .set({ enabled: true, nextRunAt: new Date() })
+          .where(eq(jobSources.id, source.id));
+      if (candidate.sourceId && candidate.sourceId !== source.id)
+        await tx
+          .update(jobSources)
+          .set({ enabled: false, nextRunAt: null, schedule: "Manual" })
+          .where(
+            and(
+              eq(jobSources.id, candidate.sourceId),
+              eq(jobSources.ownerId, userId),
+            ),
+          );
+      await tx
+        .update(companyCandidates)
+        .set({
+          status: "Resolved",
+          careersUrl: resolution.careersUrl,
+          sourceId: source.id,
+          strategy: resolution.strategy,
+          ats: resolution.ats,
+          atsKey: resolution.strategy === "ats" ? resolution.board : null,
+          policyCheck: resolution.policy,
+          updatedAt: new Date(),
+          error: "",
+        })
+        .where(eq(companyCandidates.id, candidateId));
+      if (candidate.watchlistId)
+        await tx
+          .update(companyWatchlists)
+          .set({
+            sourceId: source.id,
+            provider:
+              resolution.strategy === "ats" ? resolution.provider : null,
+            board: resolution.board,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(companyWatchlists.id, candidate.watchlistId),
+              eq(companyWatchlists.userId, userId),
+            ),
+          );
+      await recordActivity(tx, {
+        userId,
+        candidateId,
+        sourceId: source.id,
+        actor: "Worker",
+        stage: "resolved",
+        message: `${candidate.name}: careers source ready. First scan is due now; refreshes run ${resolvedSourceSchedule.toLowerCase()}.`,
+      });
+    });
+    return { resolved: true };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Company discovery failed.";
+    const [failed] = await db
+      .update(companyCandidates)
+      .set({
+        status: error instanceof RobotsBlockedError ? "Blocked" : "Failed",
+        error: message.slice(0, 1000),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(companyCandidates.id, candidateId),
+          eq(companyCandidates.userId, userId),
+          eq(companyCandidates.attempts, candidate.attempts),
+          eq(companyCandidates.status, "Resolving"),
+        ),
+      )
+      .returning();
+    if (failed?.sourceId)
+      // Leaving the source enabled would retry on the 4-hour schedule forever
+      // and fail the approval gate every time. Park it until the next retry.
+      await db
+        .update(jobSources)
+        .set({ enabled: false, nextRunAt: null })
+        .where(
+          and(
+            eq(jobSources.id, failed.sourceId),
+            eq(jobSources.ownerId, userId),
+          ),
+        );
+    if (failed)
+      await recordActivity(db, {
+        userId,
+        candidateId,
+        actor: "Worker",
+        stage: "discovery-failed",
+        level: "error",
+        message: `${candidate.name}: ${message}`,
+      });
+    return { failed: true };
+  }
 }

@@ -147,7 +147,7 @@ export async function evaluateJobWithDb(
   });
   const [spend] = await db
     .select({
-      spent: sql<number>`coalesce(sum(${jobMatches.estimatedCostMicros}), 0)::int`,
+      spent: sql<string>`coalesce(sum(${jobMatches.estimatedCostMicros}), 0)::bigint`,
     })
     .from(jobMatches)
     .where(
@@ -156,7 +156,14 @@ export async function evaluateJobWithDb(
         gte(jobMatches.evaluatedAt, monthStart()),
       ),
     );
-  if (spend.spent + estimatedCost > careerPreferences.aiMonthlyBudgetMicros)
+  // Careers extraction is charged against aiDiscoveryBudgetMicros instead, so
+  // a large company import can no longer exhaust the evaluation allowance.
+  // This also drops a month-wide aggregate over activity_events from the
+  // per-job evaluation path.
+  if (
+    Number(spend.spent) + estimatedCost >
+    careerPreferences.aiMonthlyBudgetMicros
+  )
     throw new AppError(
       429,
       "This evaluation would exceed your monthly AI budget. Increase the budget or wait for the next month.",

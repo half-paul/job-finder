@@ -51,7 +51,7 @@ export function JobSyncProvider({ children }: { children: React.ReactNode }) {
             .map(({ source }) => source);
       if (!selected.length) {
         setMessage(
-          "No enabled global feeds. Add RemoteOK or Jobicy in Discovery to start syncing jobs.",
+          "No enabled global feeds. Add one in Discovery to start syncing jobs.",
         );
         return;
       }

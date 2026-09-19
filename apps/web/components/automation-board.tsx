@@ -1,11 +1,13 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Activity, CalendarClock, Play } from "lucide-react";
 import { scanSchedules, type ScanSchedule } from "@jobfinder/shared";
 import type { automation } from "../lib/automation";
+import { ActivityFeed } from "./activity-feed";
 import { api } from "./client";
 import { Button } from "./ui/button";
+import { providerName } from "../lib/display";
 
 type Overview = Awaited<ReturnType<typeof automation.overview>>;
 type Digest = Awaited<ReturnType<typeof automation.digest>>["digest"];
@@ -20,6 +22,14 @@ const when = (value: Date | string | null | undefined) =>
  */
 export function AutomationBoard({ overview }: { overview: Overview }) {
   const router = useRouter();
+  useEffect(() => {
+    // A backgrounded tab refetched this route's whole RSC payload every five
+    // seconds, on top of the activity feed's own poll.
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") router.refresh();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [router]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -62,6 +72,7 @@ export function AutomationBoard({ overview }: { overview: Overview }) {
           </p>
         </div>
       </div>
+      <ActivityFeed />
       <div className="stats-grid">
         <div className="stat-card">
           <div>
@@ -144,7 +155,8 @@ export function AutomationBoard({ overview }: { overview: Overview }) {
                     <td>
                       <span className="job-title">{source.company}</span>
                       <small className="cell-sub">
-                        {source.provider} · {source.board}
+                        {providerName(source.provider)}
+                        {source.board ? ` · ${source.board}` : ""}
                       </small>
                     </td>
                     <td>

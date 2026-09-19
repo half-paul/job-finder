@@ -24,6 +24,7 @@ import {
   jobInputSchema,
   preferencesSchema,
   defaultPreferences,
+  jobsPageLimit,
   matchesCountries,
 } from "@jobfinder/shared";
 import { canonicalUrl, digest } from "./security";
@@ -90,17 +91,27 @@ export async function listJobs(userId: string, params: URLSearchParams) {
       sql`(${jobMatches.data}->>'overallScore')::numeric >= ${score}`,
     );
   const db = getDb();
+  const matchJoin = and(
+    eq(jobMatches.jobId, jobs.id),
+    eq(jobMatches.userId, userId),
+  );
+  const savedJoin = and(
+    eq(savedJobs.jobId, jobs.id),
+    eq(savedJobs.userId, userId),
+  );
+  // Postgres evaluates the window before LIMIT, so every returned row carries
+  // the whole filtered total. One statement keeps the count and the page on the
+  // same snapshot, which two queries cannot guarantee under READ COMMITTED.
   const rows = await db
-    .select({ job: jobs, match: jobMatches.data, state: savedJobs.status })
+    .select({
+      job: jobs,
+      match: jobMatches.data,
+      state: savedJobs.status,
+      total: sql<number>`count(*) over()::int`,
+    })
     .from(jobs)
-    .leftJoin(
-      jobMatches,
-      and(eq(jobMatches.jobId, jobs.id), eq(jobMatches.userId, userId)),
-    )
-    .leftJoin(
-      savedJobs,
-      and(eq(savedJobs.jobId, jobs.id), eq(savedJobs.userId, userId)),
-    )
+    .leftJoin(jobMatches, matchJoin)
+    .leftJoin(savedJobs, savedJoin)
     .where(and(...conditions))
     .orderBy(
       params.get("sort") === "newest"
@@ -108,9 +119,29 @@ export async function listJobs(userId: string, params: URLSearchParams) {
         : sql`(${jobMatches.data}->>'overallScore')::numeric DESC NULLS LAST`,
       desc(jobs.discoveredAt),
     )
-    .limit(51)
-    .offset((page - 1) * 50);
-  return { items: rows.slice(0, 50), hasMore: rows.length > 50, page };
+    .limit(jobsPageLimit)
+    .offset((page - 1) * jobsPageLimit);
+  // A page past the end returns no rows, so nothing carries the window count.
+  let total = rows[0]?.total ?? 0;
+  if (!rows.length && page > 1) {
+    const [counted] = await db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(jobs)
+      .leftJoin(jobMatches, matchJoin)
+      .leftJoin(savedJobs, savedJoin)
+      .where(and(...conditions));
+    total = counted?.total ?? 0;
+  }
+  return {
+    items: rows.map((row) => ({
+      job: row.job,
+      match: row.match,
+      state: row.state,
+    })),
+    hasMore: page * jobsPageLimit < total,
+    page,
+    total,
+  };
 }
 export async function getJob(userId: string, id: string) {
   const db = getDb();

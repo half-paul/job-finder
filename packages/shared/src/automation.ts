@@ -1,9 +1,14 @@
 import { z } from "zod";
+import { supportedAts } from "./discovery";
 
 const short = z.string().trim().max(200);
 
-/** ATS providers whose board identity can be resolved from a watchlist entry. */
-export const atsProviders = ["Greenhouse", "Lever", "Ashby"] as const;
+/**
+ * ATS providers whose board identity can be resolved from a watchlist entry.
+ * Derived from the vendors that have a connector, so the resolver can never
+ * store a provider this schema would then reject when the entry is edited.
+ */
+export const atsProviders = supportedAts;
 export type AtsProvider = (typeof atsProviders)[number];
 
 /**

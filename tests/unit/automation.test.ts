@@ -10,6 +10,7 @@ import {
   watchlistKey,
 } from "@jobfinder/shared";
 import {
+  crawlPatternToSpec,
   digestNotificationKey,
   matchNotificationKey,
 } from "@jobfinder/automation";
@@ -159,5 +160,41 @@ describe("Phase 4 alert and digest contracts", () => {
         digestHourUtc: 0,
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("crawlPatternToSpec", () => {
+  const row = {
+    id: "00000000-0000-0000-0000-000000000001",
+    sourceId: "00000000-0000-0000-0000-000000000002",
+    kind: "http-json",
+    urlTemplate: "https://acme.example/api/jobs?page={page}",
+    method: "GET",
+    headers: { accept: "application/json" },
+    body: null,
+    jobsPath: "/results",
+    fieldMap: { title: "/title", url: "/url" },
+    discoveredAt: new Date(),
+    lastVerifiedAt: null,
+    failures: 0,
+  };
+
+  it("maps a stored row onto the wire contract", () => {
+    expect(crawlPatternToSpec(row)).toEqual({
+      urlTemplate: "https://acme.example/api/jobs?page={page}",
+      method: "GET",
+      headers: { accept: "application/json" },
+      body: null,
+      jobsPath: "/results",
+      fieldMap: { title: "/title", url: "/url" },
+    });
+  });
+
+  it("returns null for a missing row", () => {
+    expect(crawlPatternToSpec(undefined)).toBeNull();
+  });
+
+  it("returns null for a row whose stored method is not replayable", () => {
+    expect(crawlPatternToSpec({ ...row, method: "DELETE" })).toBeNull();
   });
 });

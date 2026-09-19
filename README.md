@@ -11,7 +11,7 @@ A private career workspace for collecting opportunities and defining what your n
 - Private TXT, text-based PDF and DOCX upload, local text extraction, original download and deletion. Up to 10 documents per account, 5 MiB each. Scanned PDFs need OCR first.
 - Dashboard, live search/work/score filters, pagination, saved jobs, application status, detail pages, private notes and status history. Manual job entry makes the workspace usable before discovery connectors arrive.
 - Responsive layout, keyboard-accessible controls, light/dark toggle, empty states and explicit unevaluated matches.
-- Multi-employer RemoteOK and Jobicy feeds for cross-company discovery. Global feeds need only a provider; no company, board or search URL. Greenhouse, Lever, Ashby and allowlisted JSON-LD `JobPosting` pages remain available as employer-specific connectors.
+- Multi-employer RemoteOK, Jobicy, Remotive, The Muse, Himalayas, We Work Remotely, USAJOBS and Adzuna feeds for cross-company discovery. Global feeds need only a provider; no company, board or search URL, though USAJOBS and Adzuna will not scan until their API credentials are set. Greenhouse, Lever, Ashby, Workable, Personio, SmartRecruiters, Rippling and allowlisted JSON-LD `JobPosting` pages remain available as employer-specific connectors.
 - Hardened source transport: HTTPS only, fixed public hosts, no redirects, DNS pinning against rebinding, public-address checks, response-size and timeout limits.
 - Provider-specific validation and normalization with unknown values left explicit, HTML converted to bounded plain text, and complete-feed caching to avoid duplicate source requests.
 - Private source management and user-triggered scans. Imports preserve provider/external IDs and source URLs and upsert changed descriptions idempotently. Complete, employer-owned feeds mark missing jobs removed; rolling multi-employer feeds never do.
@@ -28,13 +28,13 @@ A private career workspace for collecting opportunities and defining what your n
 - After a sync, the portal automatically evaluates up to the configured number of eligible new or changed jobs (default 5) and reports the batch result.
 - `apps/worker` runs pg-boss in the database we already operate — no Redis. It owns every scheduled scan, scheduled evaluation, alert write, digest and cleanup pass, publishes no ports, and writes a heartbeat the Automation page reads.
 - Per-source schedules (Manual, Hourly, Every 4 hours, Twice daily, Daily) are aligned to UTC boundaries. A restart or a duplicated scheduler tick cannot enqueue the same slot twice, a missed slot collapses into one run, and a retried scan reuses the same run row instead of creating a second one.
-- Company watchlists with priorities. A watchlist entry that names a Greenhouse, Lever or Ashby board owns the employer source the worker scans directly, so that company is checked even when it never appears on a public feed; removing the entry disables the source and keeps its provenance.
+- Company watchlists with priorities. A watchlist entry that names a supported employer board (Greenhouse, Lever, Ashby, Workable, Personio, SmartRecruiters or Rippling) owns the employer source the worker scans directly, so that company is checked even when it never appears on a public feed; removing the entry disables the source and keeps its provenance.
 - Opt-in in-app alerts when an evaluated match reaches your alert score, deduped per evaluation so nothing is repeated. Nothing is emailed, messaged or pushed; the alert list and unread bell live inside the workspace.
 - An opt-in daily digest for a chosen UTC hour, with deterministic counts, ordering and highlights. Generating it on demand is additive, and its narrative sentence is the only model call.
 - Automation diagnostics: worker heartbeat and queue depth, each source's schedule, next run and last result, and the recorded search history with duration and counters — plus a clear "Not running" state when the worker is stopped.
 - Hourly housekeeping removes expired sessions, expired rate-limit buckets and read notifications older than 90 days.
 
-Discovery is both user-triggered and scheduled. A manual sync scans the global feeds in the request path with visible progress; scheduled scans, evaluation, alerts, digests and cleanup run only in the worker. Application-writing assistance and outbound notification channels (email, push, Slack, SMS) are **not implemented yet**. The app does not submit applications. Indeed has no supported public job API and is not connected. No sample jobs or shared-password accounts are installed, and no alert, digest or scan result is fabricated while the worker is stopped. The profile editor can load an explicitly labeled fictional executive example into the form for review.
+Discovery is both user-triggered and scheduled. A manual sync scans the global feeds in the request path with visible progress; scheduled scans, evaluation, alerts, digests and cleanup run only in the worker. Application-writing assistance and outbound notification channels (email, push, Slack, SMS) are **not implemented yet**. The app does not submit applications. Indeed and LinkedIn are not connected and cannot be: Indeed retired its public job-search API, neither publishes a usable replacement, and their terms forbid reading the listings any other way. No sample jobs or shared-password accounts are installed, and no alert, digest or scan result is fabricated while the worker is stopped. The profile editor can load an explicitly labeled fictional executive example into the form for review.
 
 Scans have a 5,000-job safety cap. A capped or cursor-incomplete scan is recorded as **Partial** and never marks older listings removed.
 
@@ -57,6 +57,8 @@ The `web` container optionally reads ignored `.env.local` for AI models/key and 
 
 The `worker` service runs the same image with `npm run worker`. It publishes no ports, depends on the migration service, restarts unless stopped, and is the only place scheduled scans, scheduled evaluation, alerts, the daily digest and cleanup run. Stop it with `docker compose stop worker` if you want to confirm the Automation page reports "Not running" while nothing runs in the background. No Redis is needed: pg-boss keeps its queues in the same PostgreSQL database.
 
+The `crawler` service builds `apps/crawler/Dockerfile` from the `mcr.microsoft.com/playwright:v1.63.0-noble` image and runs `npm run crawler`, an isolated HTTP service (default port 4000) that only `worker` can reach. It never receives `DATABASE_URL`, is on its own Compose network with no route to `postgres` or `web`, and publishes no port. `worker` calls it over `CRAWLER_URL`/`CRAWLER_SECRET` (both set by Compose for local development) to run a Playwright-based careers-page crawl or to capture the JSON API a careers page calls; see [architecture: crawler isolation boundary](doc/architecture.md#crawler-isolation-boundary). Unset `CRAWLER_URL`/`CRAWLER_SECRET` and discovery simply skips these two rungs, falling back to AI extraction with a warning on the candidate's activity feed — nothing is stubbed or fabricated.
+
 ```sh
 docker compose logs -f worker   # follow scheduled scan and digest activity
 docker compose restart worker   # pick up new code or configuration
@@ -73,30 +75,32 @@ docker compose up -d postgres
 npm run db:migrate
 npm run dev
 npm run worker   # second terminal: scheduled scans, alerts, digest, cleanup
+npm run crawler  # third terminal, optional: browser crawl and captured-API replay
 ```
 
-Do not overwrite an existing `.env.local`; add only missing configuration. Root `.env.local` is loaded by development, start, worker and migration commands and ignored by Git/Docker. `DATABASE_URL` is required; `APP_ORIGIN` must exactly match the browser origin for writes. The default is `http://localhost:3000`, not `127.0.0.1`. Secure cookies are enabled for HTTPS origins. `OPENAI_API_KEY` is required only for AI evaluation and the digest narrative; the rest of the workspace runs without it, and a scheduled evaluation without a key records a failure instead of a score. Agent shell operations must prefix commands with `rtk proxy`, per `AGENTS.md`.
+Do not overwrite an existing `.env.local`; add only missing configuration. Root `.env.local` is loaded by development, start, worker and migration commands and ignored by Git/Docker. `DATABASE_URL` is required; `APP_ORIGIN` must exactly match the browser origin for writes. The default is `http://localhost:3000`, not `127.0.0.1`. Secure cookies are enabled for HTTPS origins. `OPENAI_API_KEY` is required for AI evaluation, careers extraction fallback and the digest narrative; the rest of the workspace runs without it, and a scheduled evaluation without a key records a failure instead of a score. `CRAWLER_URL` and `CRAWLER_SECRET` point the worker at the crawler service; leave them unset to skip the captured-API and browser rungs. `npm run crawler` needs Playwright's Chromium installed (`npx playwright install chromium`) and its own `CRAWLER_SECRET`. Agent shell operations must prefix commands with `rtk proxy`, per `AGENTS.md`.
 
 ## Commands and verification
 
-| Command                                   | Purpose                                                              |
-| ----------------------------------------- | -------------------------------------------------------------------- |
-| `npm run dev`                             | Development server with reload                                       |
-| `npm run lint`                            | ESLint, including explicit-any prohibition                           |
-| `npm run typecheck`                       | Strict TypeScript across apps/packages/tests                         |
-| `npm run format` / `npm run format:check` | Prettier write/check                                                 |
-| `npm test`                                | Deterministic unit tests; no network/database required               |
-| `npm run db:generate`                     | Generate migration from schema changes                               |
-| `npm run db:migrate`                      | Apply migrations and enable pgvector                                 |
-| `npm run worker`                          | pg-boss worker: scheduled scans, evaluation, alerts, digest, cleanup |
-| `npm run build` / `npm start`             | Production build/start                                               |
-| `npm exec playwright install chromium`    | Install browser test runtime                                         |
-| `npm run test:e2e`                        | Real PostgreSQL/API and browser integration suite                    |
-| `npm audit --audit-level=moderate`        | Dependency vulnerability check                                       |
+| Command                                   | Purpose                                                                                                                                                                                                              |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`                             | Development server with reload                                                                                                                                                                                       |
+| `npm run lint`                            | ESLint, including explicit-any prohibition                                                                                                                                                                           |
+| `npm run typecheck`                       | Strict TypeScript across apps/packages/tests                                                                                                                                                                         |
+| `npm run format` / `npm run format:check` | Prettier write/check                                                                                                                                                                                                 |
+| `npm test`                                | Deterministic unit tests; no network/database required, but **needs Chromium installed** (`npx playwright install chromium`) — the crawler policy tests launch a real browser and fail, rather than skip, without it |
+| `npm run db:generate`                     | Generate migration from schema changes                                                                                                                                                                               |
+| `npm run db:migrate`                      | Apply migrations and enable pgvector                                                                                                                                                                                 |
+| `npm run worker`                          | pg-boss worker: scheduled scans, evaluation, alerts, digest, cleanup                                                                                                                                                 |
+| `npm run crawler`                         | Isolated browser crawler/captured-API service (`apps/crawler`); needs Chromium and its own `CRAWLER_SECRET`                                                                                                          |
+| `npm run build` / `npm start`             | Production build/start                                                                                                                                                                                               |
+| `npm exec playwright install chromium`    | Install browser test runtime, required by `npm test` and `npm run crawler` too                                                                                                                                       |
+| `npm run test:e2e`                        | Real PostgreSQL/API and browser integration suite                                                                                                                                                                    |
+| `npm audit --audit-level=moderate`        | Dependency vulnerability check                                                                                                                                                                                       |
 
 ### Discovery configuration
 
-Open **Discovery** and add **RemoteOK** or **Jobicy**. Both read their provider's current listings across employers, so they need no company name, board name or search URL. Their rolling feeds are never treated as a complete inventory, and Jobicy is refreshed at most once per hour per the provider's published terms. Greenhouse, Lever and Ashby instead read one named employer board and require that board's identifier; JSON-LD requires an HTTPS page on a host listed in `JSON_LD_ALLOWED_HOSTS` in `.env.local`.
+Open **Discovery** and add a global feed: **RemoteOK**, **Jobicy**, **Remotive**, **The Muse**, **Himalayas**, **We Work Remotely**, **USAJOBS** or **Adzuna**. Each reads its provider's current listings across employers, so none needs a company name, board name or search URL. Their rolling feeds are never treated as a complete inventory, and Jobicy is refreshed at most once per hour per the provider's published terms. **USAJOBS** needs `USAJOBS_API_KEY` and `USAJOBS_EMAIL`, and **Adzuna** needs `ADZUNA_APP_ID` and `ADZUNA_APP_KEY`, in `.env.local`; without them a scan fails with a message naming the missing variables. Greenhouse, Lever, Ashby, Workable, Personio, SmartRecruiters and Rippling instead read one named employer board and require that board's identifier; JSON-LD requires an HTTPS page on a host listed in `JSON_LD_ALLOWED_HOSTS` in `.env.local`.
 
 Click **Sync jobs** in the portal header to scan all enabled global feeds, or use **Sync source** beside one in Discovery. The portal scans feeds sequentially, continues after provider failures, refreshes results, and shows progress, import counts, partial results and source messages. The latest scan is shown even when it failed. Concurrent scans in the same workspace are rejected to avoid duplicate imports.
 
@@ -104,7 +108,7 @@ Keep the tab open until the sync finishes; you can navigate within the workspace
 
 ### Scheduling, watchlists, alerts and the digest
 
-Set each source's refresh schedule on the **Automation** page, or by adding a company to the **Watchlist** with a Greenhouse, Lever or Ashby board and choosing a schedule there. Schedules are Manual, Hourly, Every 4 hours, Twice daily or Daily, and they run on aligned UTC boundaries: a restart cannot double-run a slot, and a slot missed while the worker was down collapses into one run. The Automation page shows each source's next run, its last result and the recorded search history, and reports "Not running" when no recent worker heartbeat exists.
+Set each source's refresh schedule on the **Automation** page, or by adding a company to the **Watchlist** with a Greenhouse, Lever, Ashby, Workable, Personio, SmartRecruiters or Rippling board and choosing a schedule there. Schedules are Manual, Hourly, Every 4 hours, Twice daily or Daily, and they run on aligned UTC boundaries: a restart cannot double-run a slot, and a slot missed while the worker was down collapses into one run. The Automation page shows each source's next run, its last result and the recorded search history, and reports "Not running" when no recent worker heartbeat exists.
 
 **Watchlist** entries carry your own priority (Dream Company, High Priority, Interesting, Neutral, Avoid). An entry that names a supported board owns the employer source the worker scans on its schedule, so that company is checked directly even when it never appears on a public feed. Removing an entry disables that source rather than deleting its provenance.
 
@@ -132,6 +136,17 @@ For the full command matrix, observed results, opt-in live tests and limitations
 
 For integration/E2E tests, start PostgreSQL, migrate and build first. Playwright starts the production server unless one is already running at localhost:3000. Stop Compose web (`docker compose stop web`) before testing a host build to avoid silently testing an older container. Tests create unique `@example.test` accounts and synthetic jobs/resumes; use a disposable test database if you do not want those records in your development database. `DATABASE_URL` selects the test database; the app must use the same URL. For custom configuration, load it into the test process with `node --env-file=.env.local node_modules/@playwright/test/cli.js test`; plain `npm run test:e2e` only loads that file in the host web server. Snapshots/traces go into ignored `test-results/`.
 
+`tests/e2e/crawler.spec.ts` needs a running crawler reachable at `CRAWLER_URL` (default `http://localhost:4000`) with the matching `CRAWLER_SECRET` (default `local-development-only`). Its fixture serves an HTTPS origin at `host.docker.internal` with a self-signed certificate, which production's own address checks correctly refuse — so the crawler must run with the test-only overlay `compose.e2e.yaml`, never with `compose.yaml` alone:
+
+```sh
+docker compose build crawler worker web
+docker compose -f compose.yaml -f compose.e2e.yaml up -d --wait --build crawler
+docker compose up -d
+npx playwright test tests/e2e/crawler.spec.ts tests/e2e/companies.spec.ts
+```
+
+`compose.e2e.yaml` is never used outside a test run: it is what publishes the crawler's port, relaxes TLS verification for both Chromium (`CRAWLER_INSECURE_TLS`) and Node's own `fetch` (`NODE_TLS_REJECT_UNAUTHORIZED`), allowlists the one test hostname (`CRAWLER_INSECURE_TEST_HOSTNAME`) the fixture uses, and overrides `NODE_ENV` off `production` so those three variables can take effect at all — `apps/crawler/src/policy.ts` and `session.ts` refuse all three outright unless `NODE_ENV` is an explicit, known non-production value. `compose.yaml`'s `crawler` service has no `env_file`, so `.env.local` cannot reach it at all (that removal is also why the service never receives `DATABASE_URL`/`OPENAI_API_KEY`); this overlay is the only configuration path to any of the three insecure variables, in production or otherwise. `--wait` blocks until the crawler's unauthenticated `/health` endpoint reports healthy (the same endpoint `tests/e2e/crawler.spec.ts` checks first, to fail loudly rather than pass quietly against the wrong process on `CRAWLER_URL`).
+
 Unit tests cover password verification, exact origin checks, bounded bodies, canonical URLs, weight validation, keyword import gates, qualification/interest scoring, hard filters, strict AI schemas, OpenAI response validation and cost estimation, UTC schedule alignment, recommendation bands, watchlist keys, alert dedupe identity and preference defaults, and real TXT/PDF/DOCX parsing including malformed/oversized/compressed input. API/database tests verify hashed credentials/sessions, revocation, rate limits, foreign keys, pgvector, hard-filter precedence, archiving scope, source ownership, watchlist scoping, worker scan idempotency, alert and digest idempotency, source schedules and expired-row cleanup. Browser tests verify profile/preferences, resume ownership, private jobs, saved-state/history, archive and restore counts, filtering, mobile overflow, theme and sign-in/out.
 
 GitHub Actions runs formatting, lint, types, unit tests, migrations, dependency scanning, build, database/browser tests and container build. Deployment is deferred until an environment is configured.
@@ -141,6 +156,7 @@ GitHub Actions runs formatting, lint, types, unit tests, migrations, dependency 
 ```text
 apps/web/              UI, authenticated routes, application services
 apps/worker/           pg-boss worker: scheduled scans, evaluation, alerts, digest, cleanup
+apps/crawler/          Isolated Playwright crawler and captured-API service; no DB credentials, no published port
 packages/automation/   Scan/evaluation/watchlist/alert/digest services shared by web and worker
 packages/db/           Drizzle schema, generated SQL, migration runner
 packages/shared/       Zod contracts and editable defaults
@@ -158,3 +174,19 @@ Before a public deployment: verified email/password recovery or external identit
 Manual jobs belong to their author; future approved connector jobs may be shared. Descriptions are escaped text, never trusted HTML. Unknown salary/seniority/location stay unknown; score filtering excludes unevaluated jobs. Hard preferences block evaluation but do not hide the listing. Timeline/count dates use UTC. The theme toggle applies to the current browser document.
 
 The dev-only Drizzle transitive esbuild dependency is overridden to a patched 0.25 release; migration generation is verified against that override. Infrastructure-as-code is deferred as requested.
+
+## Company import and live activity
+
+Open **Companies** (or **Watchlist**) and enter only the company name and its website or careers URL. **Bulk import** accepts a CSV/text file, tab-separated spreadsheet rows, or pasted domains. Use `name,domain` or `company,url` columns; a domain alone uses the domain as the display name. Up to 500 organizations and 150 KB per UI import are accepted. Results show queued, duplicate and rejected rows with line numbers. Supplied careers paths are preserved, and duplicate hosts (ignoring `www`) are skipped per user.
+
+The worker picks up queued companies on its next minute tick. It checks robots.txt, follows bounded public HTTPS redirects, finds careers links, and identifies Greenhouse, Lever, Ashby, Workable, Personio, SmartRecruiters and Rippling APIs. When a careers hub has no ATS or structured listings, it checks up to three linked department pages for a supported API before choosing AI fallback. Otherwise it reads JobPosting JSON-LD, then uses the configured OpenAI model to extract careers navigation and postings from fetched page text. Each proposed URL must have appeared in the page evidence; extracted titles, descriptions and locations must be supported by that text. The model cannot execute tools or submit applications. Resolved sources get a first scan immediately due and then refresh every four hours; change schedules under **Automation**.
+
+**Live activity** on Companies, Watchlist and Automation refreshes every two seconds. It records website/robots requests, HTTP outcomes, source selection, AI extraction, imports, filtering, scan results, evaluation/alerts, digests and worker lifecycle events. Company and scan state survive a reload. Automation also refreshes heartbeat and run counters. Errors stay visible; Retry discovery requeues a failed company. Removing a company disables its source. Private activity is owner-scoped; shared events contain only generic worker lifecycle/maintenance information. Activity is retained for 90 days.
+
+Custom careers extraction is bounded to 10 pages, four AI calls and 100 postings per scan. It reads HTTP page content; login walls and CAPTCHAs are not bypassed. Unsupported layouts report a visible failure, and capped walks report Partial. Custom careers scans never mark old listings removed because the full inventory cannot be proven. A missing AI key or unavailable robots policy is a visible failure.
+
+When no ATS or JSON-LD is found and the `crawler` service is configured, discovery asks it to watch the careers page for a JSON API it calls; a replayable pattern is saved (`crawl_patterns`) and later scans replay that request over plain HTTP, no browser required. When nothing is replayable, the crawler instead walks the careers page itself (bounded pages/postings, `robots.txt` honoured, third-party hosts and non-public addresses refused, no CAPTCHA solving — a challenge page ends the session). Only when the crawler is unavailable or fails does discovery fall back to the AI extraction path above. `packages/discovery`'s ATS detection and company intake are complete; only the described fallback ordering and its two crawler rungs are new here.
+
+Each AI extraction call records a conservative $0.05 estimate, including failures, against the existing monthly preference budget and stored match estimates. This assumes default model pricing and is **not a hard billing cap** or actual token accounting. The existing key and `OPENAI_EXPLANATION_MODEL` are reused. Tests inject website and model fixtures; they make no paid calls.
+
+For changed code, rebuild both local services with `docker compose up --build -d --wait`; `restart` alone does not rebuild an image. See [company discovery validation](doc/company-discovery-validation.md).

@@ -29,6 +29,17 @@ Validated on 2026-09-15 with Node 24.15.0, PostgreSQL 16 with pgvector on the ho
 
 Agent shell commands use `rtk proxy` before the commands shown here, per `AGENTS.md`.
 
+## Cleanup follow-up — 2026-09-16
+
+Removed the unused `globalSources`, `automationPreferences` and `nextScheduledRun` exports from `packages/automation/src/sources.ts`, along with their unused imports. Repository searches found no callers. A read-only query against the database configured by `.env.local` found zero users whose email ends in `@example.test`; no deletion was necessary.
+
+- `npx eslint packages/automation/src/sources.ts`: passed.
+- `npx prettier --check packages/automation/src/sources.ts`: passed.
+- `npm test -- tests/unit/automation.test.ts`: eight passed, one failed because the existing uncommitted change to `watchlistInputSchema.provider` accepts `Workday`, contrary to the current test contract.
+- `npm run typecheck`: failed in the unfinished discovery pattern code and the discovery connector test's `CrawlerClient` import. No errors were reported in the cleaned source module.
+
+These follow-up results describe the current working tree, including separate Phase 5 work; they do not replace the original Phase 4 verification above. Build and E2E checks were not rerun for this unused-code removal.
+
 ## Coverage added in this phase
 
 - Unit tests cover UTC schedule alignment for every interval (including strict-after behaviour at an exact boundary), recommendation bands, watchlist key normalization and schema defaults, alert/digest dedupe-key identity, legacy preference parsing, and threshold range validation.

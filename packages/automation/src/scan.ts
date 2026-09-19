@@ -1,7 +1,15 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import {
+  createAdaptiveCareersConnector,
+  type ExtractPage,
+} from "@jobfinder/discovery";
+import { recordActivities, recordActivity } from "./activity";
+import { discoveryExtractor } from "./discovery-ai";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   getPool,
+  companyCandidates,
+  crawlPatterns,
   jobReferences,
   jobSources,
   jobs,
@@ -15,11 +23,13 @@ import {
   isGlobalSource,
   keywordFilter,
   preferencesSchema,
+  type CrawlPatternSpec,
 } from "@jobfinder/shared";
 import { canonicalUrl, digest } from "@jobfinder/shared/hash";
 import {
   createConnector,
   providerName,
+  resolveCrawlerClient,
   type ConnectorOptions,
   type JobReference,
   type NormalizedJob,
@@ -44,6 +54,7 @@ export interface ScanSourceOptions {
   connectorOptions?: ConnectorOptions;
   /** Aborts in-flight provider requests when the worker is shutting down. */
   signal?: AbortSignal;
+  extractPage?: ExtractPage;
 }
 
 export type SearchRunRow = typeof searchRuns.$inferSelect;
@@ -101,6 +112,45 @@ export async function scanSourceRecord(
   }
 }
 
+/**
+ * Minimum gap between successful scans for providers that publish a rate limit.
+ * A schedule may be set to Hourly for any source, so the limit is enforced here
+ * rather than left to the schedule the user picked.
+ */
+const minScanIntervalMs: Record<string, number> = {
+  Jobicy: 3_600_000,
+  // Remotive's API notice asks for at most four calls a day and states that
+  // excessive requests are blocked and access can be terminated.
+  Remotive: 6 * 3_600_000,
+};
+
+const scanIntervalReason: Record<string, string> = {
+  Jobicy: "This feed refreshes at most once per hour.",
+  Remotive: "This feed refreshes at most once every six hours.",
+};
+
+export type CrawlPatternRow = typeof crawlPatterns.$inferSelect;
+
+/**
+ * The stored row is wider than the wire contract and its `method` is a plain
+ * text column, so a row written by an older migration cannot be trusted to
+ * hold a replayable verb.
+ */
+export function crawlPatternToSpec(
+  row: CrawlPatternRow | undefined,
+): CrawlPatternSpec | null {
+  if (!row) return null;
+  if (row.method !== "GET" && row.method !== "POST") return null;
+  return {
+    urlTemplate: row.urlTemplate,
+    method: row.method,
+    headers: row.headers,
+    body: row.body,
+    jobsPath: row.jobsPath,
+    fieldMap: row.fieldMap,
+  };
+}
+
 export async function scanSourceWithDb(
   options: ScanSourceOptions,
   db: AutomationDb,
@@ -113,7 +163,8 @@ export async function scanSourceWithDb(
     .where(and(eq(jobSources.id, sourceId), eq(jobSources.ownerId, userId)));
   if (!source) throw new AppError(404, "Source not found.");
   if (!source.enabled) throw new AppError(409, "This source is disabled.");
-  if (source.provider === "Jobicy") {
+  const throttle = minScanIntervalMs[source.provider];
+  if (throttle) {
     const [previous] = await db
       .select()
       .from(searchRuns)
@@ -125,7 +176,7 @@ export async function scanSourceWithDb(
       )
       .orderBy(desc(searchRuns.startedAt))
       .limit(1);
-    if (previous && Date.now() - previous.startedAt.getTime() < 3_600_000)
+    if (previous && Date.now() - previous.startedAt.getTime() < throttle)
       return {
         ...previous,
         id: options.runId ?? previous.id,
@@ -134,7 +185,7 @@ export async function scanSourceWithDb(
         removed: 0,
         filtered: 0,
         warnings: [
-          "Using the latest Jobicy scan. This feed refreshes at most once per hour.",
+          `Using the latest ${source.provider} scan. ${scanIntervalReason[source.provider]}`,
         ],
       };
   }
@@ -156,17 +207,102 @@ export async function scanSourceWithDb(
     trigger,
   });
   const startedAt = Date.now();
+  const actor = trigger === "Schedule" ? "Worker" : "Application";
+  const event = (stage: string, message: string) => ({
+    userId,
+    sourceId,
+    runId: run.id,
+    actor,
+    stage,
+    message: `${source.company || source.provider}: ${message}`,
+  });
+  const progress = (stage: string, message: string) =>
+    recordActivity(db, event(stage, message));
+  // Only warnings are written per listing now, still buffered: an import that
+  // logged every listing made activity_events the largest table in the
+  // database and the slowest read on the feed's two-second poll. Counts for
+  // added, updated and filtered listings live on the run summary instead.
+  const buffered: ReturnType<typeof event>[] = [];
+  const flushProgress = async () => {
+    if (!buffered.length) return;
+    const batch = buffered.splice(0, buffered.length);
+    await recordActivities(db, batch);
+  };
+  const bufferProgress = async (stage: string, message: string) => {
+    buffered.push(event(stage, message));
+    if (buffered.length >= 50) await flushProgress();
+  };
+  await progress(
+    "scan-start",
+    `Starting ${trigger.toLowerCase()} scan using ${source.provider}.`,
+  );
+  // Hoisted so the catch block can record a failure against the same pattern
+  // the try block loaded, without threading it through every intermediate call.
+  let patternRow: CrawlPatternRow | undefined;
   try {
     const provider = providerName(source.provider);
-    const connector = createConnector(provider, {
-      ...options.connectorOptions,
-      jsonLdAllowedHosts:
-        options.connectorOptions?.jsonLdAllowedHosts ??
-        (process.env.JSON_LD_ALLOWED_HOSTS ?? "")
-          .split(",")
-          .map((host) => host.trim().toLowerCase())
-          .filter(Boolean),
-    });
+    if (provider === "Careers") {
+      const [approved] = await db
+        .select()
+        .from(companyCandidates)
+        .where(
+          and(
+            eq(companyCandidates.userId, userId),
+            eq(companyCandidates.sourceId, sourceId),
+            // A re-resolution in flight leaves the candidate Pending or
+            // Resolving. The approval it already earned still stands, so the
+            // scheduled scan must not fail for the duration of the retry.
+            inArray(companyCandidates.status, [
+              "Resolved",
+              "Pending",
+              "Resolving",
+            ]),
+          ),
+        );
+      if (!approved?.policyCheck?.robotsAllowed)
+        throw new AppError(
+          409,
+          "Company discovery must approve this careers source before scanning.",
+        );
+    }
+    if (provider === "CapturedApi") {
+      [patternRow] = await db
+        .select()
+        .from(crawlPatterns)
+        .where(eq(crawlPatterns.sourceId, sourceId));
+    }
+    const crawlPattern = crawlPatternToSpec(patternRow);
+    if (provider === "CapturedApi" && !crawlPattern)
+      throw new AppError(
+        409,
+        "This source has no saved API pattern. Retry discovery to rebuild it.",
+      );
+    const connector =
+      provider === "Careers"
+        ? createAdaptiveCareersConnector({
+            ...options.connectorOptions,
+            onProgress: progress,
+            extractPage:
+              options.extractPage ??
+              discoveryExtractor(db, userId, {
+                sourceId,
+                runId: run.id,
+                actor,
+              }),
+          })
+        : createConnector(provider, {
+            ...options.connectorOptions,
+            crawlPattern,
+            crawlerClient: resolveCrawlerClient(
+              options.connectorOptions?.crawlerClient,
+            ),
+            jsonLdAllowedHosts:
+              options.connectorOptions?.jsonLdAllowedHosts ??
+              (process.env.JSON_LD_ALLOWED_HOSTS ?? "")
+                .split(",")
+                .map((host) => host.trim().toLowerCase())
+                .filter(Boolean),
+          });
     const query = {
       board: source.board,
       terms: [],
@@ -180,6 +316,7 @@ export async function scanSourceWithDb(
             lastModified: source.lastModified ?? undefined,
           }
         : undefined;
+    await progress("fetch", "Requesting job listings.");
     let page = await connector.search(query, initialCursor, options.signal);
     const warnings: string[] = [];
     let canMarkRemovals = true;
@@ -195,6 +332,11 @@ export async function scanSourceWithDb(
       if (page.canMarkRemovals === false) canMarkRemovals = false;
       if (!page.notModified) {
         discovered += page.jobs.length;
+        await progress(
+          "page",
+          `Received ${page.jobs.length} listings; processing and applying keyword filters.`,
+        );
+        let processed = 0;
         for (const reference of page.jobs) {
           const fullReference: JobReference = {
             ...reference,
@@ -221,17 +363,34 @@ export async function scanSourceWithDb(
             );
             if (result === "added") added++;
             if (result === "updated") updated++;
+            // Counted in the run summary rather than written per listing.
           } catch (error) {
-            warnings.push(
-              `${reference.externalId}: ${
-                error instanceof Error
-                  ? error.message
-                  : "could not normalize job"
-              }`,
-            );
+            const warning = `${reference.externalId}: ${
+              error instanceof Error ? error.message : "could not read posting"
+            }`;
+            await bufferProgress("warning", warning);
+            warnings.push(warning);
+          } finally {
+            processed++;
+            if (processed % 10 === 0)
+              await db
+                .update(searchRuns)
+                .set({ discovered, added, updated, filtered })
+                .where(eq(searchRuns.id, run.id));
           }
         }
+        await flushProgress();
       }
+      await db
+        .update(searchRuns)
+        .set({
+          discovered,
+          added,
+          updated,
+          filtered,
+          warnings: warnings.slice(0, 100),
+        })
+        .where(eq(searchRuns.id, run.id));
       const complete = page.complete || page.notModified;
       if (!complete && (!cursor || seen.length >= maxJobs)) {
         return await finishRun(db, run.id, {
@@ -264,7 +423,7 @@ export async function scanSourceWithDb(
         : 0;
       if (!canMarkRemovals)
         warnings.push(
-          "This feed contains recent listings across employers. Missing listings are not marked removed.",
+          "This scan cannot prove the complete job inventory. Missing listings are not marked removed.",
         );
       await db
         .update(jobSources)
@@ -273,6 +432,11 @@ export async function scanSourceWithDb(
           lastModified: page.next?.lastModified ?? null,
         })
         .where(eq(jobSources.id, source.id));
+      if (patternRow)
+        await db
+          .update(crawlPatterns)
+          .set({ lastVerifiedAt: new Date(), failures: 0 })
+          .where(eq(crawlPatterns.id, patternRow.id));
       return await finishRun(db, run.id, {
         status: "Succeeded",
         startedAt,
@@ -300,6 +464,9 @@ export async function scanSourceWithDb(
       },
     });
   } catch (error) {
+    // Buffered listing progress explains what the scan managed before it
+    // failed, so it is written before the failure event.
+    await flushProgress().catch(() => undefined);
     await db
       .update(searchRuns)
       .set({
@@ -309,6 +476,20 @@ export async function scanSourceWithDb(
         error: error instanceof Error ? error.message : "Source scan failed",
       })
       .where(eq(searchRuns.id, run.id));
+    if (patternRow)
+      await db
+        .update(crawlPatterns)
+        .set({ failures: sql`${crawlPatterns.failures} + 1` })
+        .where(eq(crawlPatterns.id, patternRow.id));
+    await recordActivity(db, {
+      userId,
+      sourceId,
+      runId: run.id,
+      actor,
+      stage: "scan-failed",
+      level: "error",
+      message: `${source.company}: ${error instanceof Error ? error.message : "Scan failed"}`,
+    });
     if (error instanceof AppError) throw error;
     throw new AppError(
       502,
@@ -381,6 +562,15 @@ async function finishRun(
     })
     .where(eq(searchRuns.id, id))
     .returning();
+  await recordActivity(db, {
+    userId: row.userId,
+    sourceId: row.sourceId,
+    runId: row.id,
+    actor: row.trigger === "Schedule" ? "Worker" : "Application",
+    stage: "scan-complete",
+    level: input.status === "Partial" ? "warning" : "info",
+    message: `${input.status}: ${row.discovered} found, ${row.added} added, ${row.updated} updated, ${row.filtered} filtered, ${row.removed} removed. ${row.warnings.join(" ")}`,
+  });
   return row;
 }
 

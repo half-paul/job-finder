@@ -6,14 +6,16 @@ JobFinder AI is a private career workspace: discover permitted job feeds, filter
 
 - `apps/web` (`@jobfinder/web`): Next.js App Router UI, authenticated route handlers in `app/api/[...path]/route.ts`, server-only services in `lib/`, presentational components in `components/`. Workspace pages live under `app/(workspace)/`.
 - `apps/worker` (`@jobfinder/worker`): the pg-boss process. Owns scheduled scans, scheduled evaluation, alert writes, the daily digest and hourly cleanup; publishes no ports. Handlers live in `src/handlers.ts`, queue names and job payload schemas in `src/queues.ts`.
+- `apps/crawler` (`@jobfinder/crawler`): an isolated Playwright HTTP service reachable only from `apps/worker` over a bearer secret. It holds no database credentials and is never given `DATABASE_URL`. It navigates careers pages under the same host/robots/private-address policy as the rest of discovery (`src/policy.ts`, `src/robots.ts`), extracts postings (`src/extract.ts`), and captures the JSON API a page calls so it can be replayed without a browser (`src/capture.ts`). Runs as the `crawler` Compose service, built from `apps/crawler/Dockerfile`, on its own network with no route to `postgres` and no published port.
 - `packages/automation` (`@jobfinder/automation`): the Next.js-free service layer shared by web and worker — the source scan engine, the bounded evaluation batch, watchlists, alerts, the digest, schedule arithmetic, cleanup and diagnostics. `apps/web/lib/discovery.ts` and `apps/web/lib/matching.ts` are thin `server-only` wrappers over it.
-- `packages/db` (`@jobfinder/db`): Drizzle schema in `src/schema.ts`, the migration runner in `src/migrate.ts`, and checked-in SQL under `drizzle/`. 20 tables today.
-- `packages/job-sources` (`@jobfinder/job-sources`): the `SourceConnector` contract, the Greenhouse, Lever, Ashby, RemoteOK, Jobicy and allowlisted JSON-LD connectors, and the hardened `transport.ts`.
+- `packages/db` (`@jobfinder/db`): Drizzle schema in `src/schema.ts`, the migration runner in `src/migrate.ts`, and checked-in SQL under `drizzle/`. 23 tables today.
+- `packages/job-sources` (`@jobfinder/job-sources`): the `SourceConnector` contract, the employer-board connectors (Greenhouse, Lever, Ashby, Workable, Personio, SmartRecruiters, Rippling), the multi-employer feed connectors (RemoteOK, Jobicy, Remotive, The Muse, Himalayas, We Work Remotely, USAJOBS, Adzuna), the allowlisted JSON-LD connector, and the hardened `transport.ts`.
 - `packages/matching` (`@jobfinder/matching`): deterministic filters and score aggregation, embedding helpers, the OpenAI client and the response schema.
 - `packages/shared` (`@jobfinder/shared`): Zod contracts, editable defaults, country, keyword and automation logic (schedules, watchlists, alert/digest thresholds, recommendation bands). Node-only hashing is exposed separately as `@jobfinder/shared/hash` so browser bundles stay free of `node:crypto`.
 - `tests/unit`: deterministic Vitest tests. `tests/e2e`: Playwright API and browser tests.
 - `doc`: requirements, architecture and per-phase validation reports.
-- Not present yet: `packages/discovery` (Phase 5), `packages/ai`, `infrastructure/` (deferred). Do not reference them as if they exist.
+- `packages/discovery`: seed-list parsing, safe careers discovery, ATS detection and bounded AI extraction. Company intake, activity, the captured-API resolver rung and the browser-crawl resolver rung (`src/resolver.ts`, backed by `apps/crawler`) are all implemented; AI extraction remains the last-resort fallback when the crawler is unavailable or finds nothing replayable.
+- Not present yet: `packages/ai`, `infrastructure/` (deferred). Do not reference them as if they exist.
 
 ## Build, Test, and Development Commands
 
@@ -25,23 +27,27 @@ docker compose up -d postgres   # PostgreSQL 16 with pgvector on 127.0.0.1:54329
 npm run db:migrate
 npm run dev                     # Next.js on http://localhost:3000
 npm run worker                  # pg-boss worker: scheduled scans, alerts, digest, cleanup
+npm run crawler                 # isolated browser crawler/captured-API service, optional
 
 npm run lint          # ESLint
 npm run typecheck     # tsc --noEmit across apps, packages and tests
 npm run format        # Prettier write
 npm run format:check  # Prettier check, a CI gate
-npm test              # Vitest unit tests
+npm test              # Vitest unit tests — needs Chromium installed (see below)
 npm run build         # Next.js production build
 npm run test:e2e      # Playwright; needs Postgres, migrations and a build
 npm run db:generate   # Drizzle: generate SQL from schema changes
 ```
 
-- `docker compose up --build -d --wait` runs migrate, then web and worker; it waits for health at `/api/health`. The worker has no health endpoint, so check `docker compose logs worker`.
+- `docker compose up --build -d --wait` runs migrate, then web, worker and crawler; it waits for health at `/api/health`. The worker and crawler have no health endpoint, so check `docker compose logs worker` / `docker compose logs crawler`.
 - `npm run worker` needs `DATABASE_URL` and reads the same ignored `.env.local` as the other commands. It runs TypeScript through `tsx`, like `db:migrate`. Without it, nothing scheduled runs and the Automation page reports "Not running".
+- `npm run crawler` needs `CRAWLER_SECRET` and a Chromium install (`npx playwright install chromium`), never `DATABASE_URL`. `worker` reaches it over `CRAWLER_URL`/`CRAWLER_SECRET`; unset, discovery skips the captured-API and browser rungs and falls back to AI extraction.
+- `npm test` requires Chromium (`npx playwright install chromium`): `tests/unit/crawler-*.test.ts` launches a real browser for security-relevant assertions and fails outright, rather than skipping, when it is absent — a silently-skipped security test is exactly the failure mode that let an SSRF survive three review rounds during this feature's development.
 - Playwright reuses an existing server at `localhost:3000`. Stop the Compose web service (`docker compose stop web`) before testing a host build, or the suite silently tests the older container.
+- `tests/e2e/crawler.spec.ts` needs a crawler reachable at `CRAWLER_URL` and only ever runs against the `compose.e2e.yaml` overlay (see `README.md`), never against `compose.yaml` alone: its fixture is a private, self-signed HTTPS origin that production's own SSRF and TLS checks correctly refuse.
 - E2E tests create synthetic `@example.test` accounts and jobs in the configured database.
 - Live connector and AI tests are opt-in and cost bandwidth or money: `DISCOVERY_LIVE_SMOKE=1` and `AI_LIVE_SMOKE=1`, each exactly `1`. Default runs skip them.
-- `.github/workflows/ci.yml` runs lint, format check, typecheck, unit tests, migrations, `npm audit --audit-level=moderate`, build, browser tests and a container build.
+- `.github/workflows/ci.yml` runs lint, format check, typecheck (Chromium is installed before unit tests, deliberately, so the crawler security test cannot silently skip), migrations, `npm audit --audit-level=moderate`, build, the crawler container against the e2e overlay, browser tests and container builds for both images.
 
 ## Coding Style & Naming Conventions
 
@@ -104,3 +110,13 @@ npm run db:generate   # Drizzle: generate SQL from schema changes
 ## Agent Shell Operations
 
 Follow the RTK guidance in your global agent configuration (`RTK.md`): prefix commands with `rtk`, or use `rtk proxy <command>` when raw output is needed, for example `rtk git status --short`. In Claude Code a hook rewrites most commands automatically, so write the plain command and let the hook handle it.
+
+## Company discovery and activity
+
+- Add Company requires only a name and URL; bulk input accepts domains, CSV and TSV. Intake writes owner-scoped candidates and watchlist entries without doing network work in the request.
+- Worker queue `resolve-company` claims Pending candidates, discovers careers/API strategy and schedules the first source scan. Claims use attempt fencing and stale work is recoverable after 15 minutes. Test handlers with injected website fixtures; never let default tests resolve real domains.
+- `activity_events` records live company, scan, AI, application and worker actions. Private events require a user ID. Only generic lifecycle/maintenance events may be shared. Do not log keys, fetched content, resumes, credentials or query strings.
+- Careers resolution checks up to three observed department links when the careers hub has no ATS or structured jobs, honouring robots before selecting an API.
+- AI careers fallback reads bounded HTTP page text (10 pages, 4 calls, 100 jobs), validates evidence and observed links, honours robots, and never marks removals. No JavaScript browser service or authentication bypass is implemented.
+- AI discovery uses the existing key/model and stores conservative per-call estimates against the monthly preference budget. This is not a billing cap; default tests inject extraction and never call OpenAI.
+- Read `doc/company-discovery-validation.md` for implementation coverage and limits.

@@ -1,0 +1,43 @@
+# TEST-ONLY OVERLAY. Never apply this file outside a local or CI e2e run:
+#   docker compose -f compose.yaml -f compose.e2e.yaml up -d
+#
+# Every key here exists solely so tests/e2e/crawler.spec.ts's self-signed,
+# private-address fixture (served at https://host.docker.internal:<port>) is
+# reachable and trusted. None of it is safe against real traffic:
+#
+# - CRAWLER_INSECURE_TLS and NODE_TLS_REJECT_UNAUTHORIZED disable certificate
+#   verification for Chromium and for Node's own `fetch` (used by
+#   apps/crawler/src/robots.ts) respectively. They are two different HTTP
+#   clients inside the same container, so both must be set or one of them
+#   still fails closed against the fixture's self-signed certificate.
+# - CRAWLER_INSECURE_TEST_HOSTNAME is the test-only SSRF allowlist gate
+#   (apps/crawler/src/policy.ts, `insecureTestHostnameAllowed`): it permits
+#   exactly the one literal hostname named here — nothing else, no ranges —
+#   to resolve to a private address. It is not documented in .env.example
+#   and is never set in compose.yaml.
+# - NODE_ENV overrides compose.yaml's `NODE_ENV: production` for this
+#   service only. apps/crawler/src/policy.ts and session.ts refuse all
+#   three insecure vars above outright whenever NODE_ENV is "production",
+#   so this override is what lets the values this file sets directly (below)
+#   take effect at all; nothing else may unset it. This is the ONLY
+#   configuration path for any of the three: compose.yaml's crawler service
+#   has no `env_file`, on purpose (see its own comment — the crawler must
+#   never be able to receive DATABASE_URL/OPENAI_API_KEY from an operator's
+#   `.env.local` either), so unlike every other service here it cannot pick
+#   these up from a file at all, in production or in this overlay.
+# - extra_hosts makes host.docker.internal resolvable from inside the
+#   container on Linux (the `host-gateway` special value), not only on
+#   Docker Desktop; the e2e fixture server binds to the CI runner/host itself.
+# - The published port lets a host-run Playwright process reach the
+#   otherwise-unpublished crawler service directly.
+services:
+  crawler:
+    environment:
+      NODE_ENV: test
+      CRAWLER_INSECURE_TLS: "1"
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+      CRAWLER_INSECURE_TEST_HOSTNAME: host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:4000:4000"

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createConnector,
+  fetchText,
   htmlToText,
   providerName,
   retryAfterMs,
@@ -232,5 +233,30 @@ describe("Phase 2 source connectors", () => {
     expect(() => providerName("crawler")).toThrow();
     expect(retryAfterMs("90")).toBe(90000);
     expect(retryAfterMs("not-a-date")).toBeUndefined();
+  });
+
+  it("builds a CapturedApi connector, which refuses to run without a saved pattern", async () => {
+    const connector = createConnector("CapturedApi", {});
+    await expect(
+      connector.search({ board: "acme", terms: [] }),
+    ).rejects.toThrow(/saved API pattern/i);
+  });
+
+  it("sends a captured pattern's method and body through the fetch transport", async () => {
+    let seenInit: RequestInit | undefined;
+    await fetchText(
+      new URL("https://acme.example/api/jobs"),
+      { accept: "application/json" },
+      {
+        method: "POST",
+        body: JSON.stringify({ page: 1 }),
+        fetchImpl: (async (_url, init) => {
+          seenInit = init;
+          return new Response("{}");
+        }) as typeof fetch,
+      },
+    );
+    expect(seenInit?.method).toBe("POST");
+    expect(seenInit?.body).toBe(JSON.stringify({ page: 1 }));
   });
 });

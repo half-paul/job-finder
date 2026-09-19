@@ -69,9 +69,12 @@ test("archived opportunities leave every count, list and batch without being re-
 
     const stat = (label: string) =>
       page.locator(".stat-card", { hasText: label }).locator("strong");
+    const resultsMeta = page.locator(".results-meta span").first();
     await page.goto("/");
     await expect(stat("Opportunities")).toHaveText("2");
     await expect(stat("Saved")).toHaveText("1");
+    // The list reports the whole filtered total, not just the page it shows.
+    await expect(resultsMeta).toHaveText("Showing 1\u20132 of 2 opportunities");
 
     // A completed global-feed scan references the archived job, so the
     // automatic evaluation batch can be checked without calling the provider.
@@ -100,6 +103,7 @@ test("archived opportunities leave every count, list and batch without being re-
     // state itself is the durable assertion.
     await expect(stat("Opportunities")).toHaveText("1");
     await expect(stat("Saved")).toHaveText("0");
+    await expect(resultsMeta).toHaveText("Showing 1\u20131 of 1 opportunity");
     await expect(
       page.getByRole("link", { name: shelved.title, exact: true }),
     ).toHaveCount(0);
@@ -113,12 +117,14 @@ test("archived opportunities leave every count, list and batch without being re-
     expect(
       listed.items.map((row: { job: { id: string } }) => row.job.id),
     ).toEqual([kept.id]);
+    expect(listed.total).toBe(1);
     const archived = await (
       await request.get("/api/jobs?view=archived")
     ).json();
     expect(
       archived.items.map((row: { job: { id: string } }) => row.job.id),
     ).toEqual([shelved.id]);
+    expect(archived.total).toBe(1);
     const detail = await request.get(`/api/jobs/${shelved.id}`);
     expect(detail.ok()).toBe(true);
     expect((await detail.json()).job.archivedAt).toBeTruthy();

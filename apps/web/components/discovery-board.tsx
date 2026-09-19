@@ -7,6 +7,7 @@ import { Button } from "./ui/button";
 import { api } from "./client";
 import { useJobSync } from "./job-sync";
 import { globalSourceProviders, isGlobalSource } from "@jobfinder/shared";
+import { providerLabel, providerName } from "../lib/display";
 
 type SourceRow = Awaited<ReturnType<typeof listSources>>[number];
 
@@ -70,7 +71,9 @@ export function DiscoveryBoard({ sources }: { sources: SourceRow[] }) {
               }
             >
               {providers.map((provider) => (
-                <option key={provider}>{provider}</option>
+                <option key={provider} value={provider}>
+                  {providerLabel(provider)}
+                </option>
               ))}
             </select>
           </label>
@@ -83,10 +86,15 @@ export function DiscoveryBoard({ sources }: { sources: SourceRow[] }) {
         </form>
       </section>
       <p className="muted">
-        RemoteOK and Jobicy provide remote jobs across employers. Indeed is not
-        connected. Greenhouse, Lever and Ashby require individual employer
-        boards and are not all-company search feeds. Scheduled refreshes and
-        each source&apos;s next run are managed on the Automation page.
+        RemoteOK, Jobicy, Remotive, Himalayas and We Work Remotely cover remote
+        roles across employers; The Muse covers on-site roles too. USAJOBS and
+        Adzuna need their own API credentials before a scan will run. Indeed and
+        LinkedIn are not connected and cannot be: neither publishes a usable job
+        API, and their terms forbid reading the listings any other way.
+        Greenhouse, Lever, Ashby, Workable, Personio, SmartRecruiters and
+        Rippling are employer boards rather than search feeds, so they are added
+        per company from Companies. Scheduled refreshes and each source&apos;s
+        next run are managed on the Automation page.
       </p>
       <section className="panel opportunities">
         <div className="panel-heading">
@@ -121,7 +129,9 @@ export function DiscoveryBoard({ sources }: { sources: SourceRow[] }) {
                 {sources.map(({ source, lastRun }) => (
                   <tr key={source.id}>
                     <td>
-                      <span className="job-title">{source.provider}</span>
+                      <span className="job-title">
+                        {providerName(source.provider)}
+                      </span>
                     </td>
                     <td>
                       <span>
@@ -201,8 +211,8 @@ export function DiscoveryBoard({ sources }: { sources: SourceRow[] }) {
             </span>
             <h3>Choose a job feed</h3>
             <p>
-              Add RemoteOK or Jobicy to discover jobs from multiple employers.
-              Add countries in Preferences to focus your results.
+              Add a feed above to discover jobs from multiple employers. Add
+              countries in Preferences to focus your results.
             </p>
           </div>
         )}

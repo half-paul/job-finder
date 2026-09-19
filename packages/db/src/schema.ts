@@ -13,7 +13,13 @@ import {
   vector,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import type { Profile, Preferences, JobMatch } from "@jobfinder/shared";
+import type {
+  Profile,
+  Preferences,
+  JobMatch,
+  PolicyCheck,
+  PatternFieldMap,
+} from "@jobfinder/shared";
 const createdAt = () =>
   timestamp("created_at", { withTimezone: true }).defaultNow().notNull();
 export const users = pgTable("users", {
@@ -316,6 +322,78 @@ export const companyWatchlists = pgTable(
   ],
 );
 
+/**
+ * A company the user asked us to import. The worker resolves each candidate
+ * once into a strategy and a `job_sources` row; it is not re-resolved until
+ * its source fails repeatedly or the user presses Retry.
+ */
+export const companyCandidates = pgTable(
+  "company_candidates",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    watchlistId: uuid("watchlist_id").references(() => companyWatchlists.id, {
+      onDelete: "set null",
+    }),
+    name: text().notNull(),
+    /** Registrable domain, lowercase. One candidate per domain per user. */
+    domain: text().notNull(),
+    origin: text().notNull().default("seed"),
+    websiteUrl: text("website_url"),
+    status: text().notNull().default("Pending"),
+    careersUrl: text("careers_url"),
+    ats: text(),
+    atsKey: text("ats_key"),
+    strategy: text().notNull().default("none"),
+    sourceId: uuid("source_id").references(() => jobSources.id, {
+      onDelete: "set null",
+    }),
+    policyCheck: jsonb("policy_check").$type<PolicyCheck>(),
+    error: text().notNull().default(""),
+    attempts: integer().notNull().default(0),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    nextCheckAt: timestamp("next_check_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (t) => [
+    uniqueIndex("candidate_owner_domain_unique").on(t.userId, t.domain),
+    index("candidate_status_next_idx").on(t.status, t.nextCheckAt),
+    // Deleting a watchlist entry or a source nulls these columns out, and
+    // deleteWatchlist also looks candidates up by watchlist id.
+    index("candidate_watchlist_idx").on(t.watchlistId),
+    index("candidate_source_idx").on(t.sourceId),
+  ],
+);
+
+/** A JSON request the crawler saw a careers page make; refreshes replay it. */
+export const crawlPatterns = pgTable(
+  "crawl_patterns",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => jobSources.id, { onDelete: "cascade" }),
+    kind: text().notNull().default("http-json"),
+    urlTemplate: text("url_template").notNull(),
+    method: text().notNull().default("GET"),
+    headers: jsonb().$type<Record<string, string>>().notNull().default({}),
+    body: text(),
+    jobsPath: text("jobs_path").notNull(),
+    fieldMap: jsonb("field_map").$type<PatternFieldMap>().notNull(),
+    discoveredAt: timestamp("discovered_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }),
+    failures: integer().notNull().default(0),
+  },
+  (t) => [uniqueIndex("crawl_pattern_source_unique").on(t.sourceId)],
+);
+
 export const notifications = pgTable(
   "notifications",
   {
@@ -350,3 +428,35 @@ export const automationState = pgTable("automation_state", {
     .defaultNow()
     .notNull(),
 });
+
+/** Durable, owner-scoped progress. Never store credentials or page contents. */
+export const activityEvents = pgTable(
+  "activity_events",
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    candidateId: uuid("candidate_id").references(() => companyCandidates.id, {
+      onDelete: "cascade",
+    }),
+    sourceId: uuid("source_id").references(() => jobSources.id, {
+      onDelete: "cascade",
+    }),
+    runId: uuid("run_id"),
+    actor: text().notNull(),
+    stage: text().notNull(),
+    level: text().notNull().default("info"),
+    message: text().notNull(),
+    estimatedCostMicros: integer("estimated_cost_micros").notNull().default(0),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("activity_owner_created_idx").on(t.userId, t.createdAt),
+    // user_id leads the index above, so a predicate on created_at alone (the
+    // retention sweep) cannot use it and would scan the whole table.
+    index("activity_created_idx").on(t.createdAt),
+    // Both foreign keys cascade on delete: without these a company or source
+    // removal scans the whole table to find the rows it has to delete.
+    index("activity_candidate_idx").on(t.candidateId),
+    index("activity_source_idx").on(t.sourceId),
+  ],
+);

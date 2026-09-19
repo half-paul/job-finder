@@ -1,7 +1,13 @@
 import { PgBoss } from "pg-boss";
 import { getDb, getPool } from "@jobfinder/db";
-import { recordWorkerHeartbeat } from "@jobfinder/automation";
 import {
+  recordWorkerHeartbeat,
+  pendingCompanies,
+  recordActivity,
+} from "@jobfinder/automation";
+import {
+  resolveCompanyJobSchema,
+  type ResolveCompanyJob,
   evaluateBatchJobSchema,
   housekeepingJobSchema,
   queueNames,
@@ -14,6 +20,7 @@ import {
   type ScheduleTickJob,
 } from "./queues";
 import {
+  runResolveCompanyJob,
   runEvaluationJob,
   runHousekeeping,
   runScanJob,
@@ -64,6 +71,14 @@ async function main() {
   await boss.start();
   const db = getDb();
 
+  await boss.createQueue(queueNames.resolveCompany, {
+    // "stately" dedupes queued jobs as well as the running one. Under
+    // "singleton" the scheduler tick re-sent every pending candidate each
+    // minute and the backlog grew behind a wall of duplicates.
+    policy: "stately",
+    retryLimit: 0,
+    expireInSeconds: 600,
+  });
   await boss.createQueue(queueNames.scanSource, {
     policy: "singleton",
     retryLimit: 2,
@@ -105,6 +120,19 @@ async function main() {
     { key: "housekeeping", tz: "UTC", missed: "once" },
   );
 
+  await boss.work<ResolveCompanyJob>(
+    queueNames.resolveCompany,
+    { batchSize: 1, localConcurrency: 1, pollingIntervalSeconds: 5 },
+    async (jobs) => {
+      for (const job of jobs)
+        await runResolveCompanyJob(
+          db,
+          { data: resolveCompanyJobSchema.parse(job.data) },
+          { signal: job.signal },
+        );
+    },
+  );
+
   await boss.work<ScanSourceJob>(
     queueNames.scanSource,
     { batchSize: 1, localConcurrency: 1, pollingIntervalSeconds: 5 },
@@ -133,6 +161,15 @@ async function main() {
             sourceId: payload.sourceId,
             message: error instanceof Error ? error.message : "unknown",
           });
+          await recordActivity(db, {
+            userId: payload.userId,
+            sourceId: payload.sourceId,
+            actor: "Worker",
+            stage: "retry",
+            level: "error",
+            message:
+              "Scan failed; automatic retries are limited to two attempts. See the scan error for details.",
+          });
           // Rethrow so pg-boss applies the queue's retry policy.
           throw error;
         }
@@ -152,6 +189,14 @@ async function main() {
             ...(await runEvaluationJob(db, { data: payload })),
           });
         } catch (error) {
+          await recordActivity(db, {
+            userId: payload.userId,
+            actor: "Worker",
+            stage: "evaluation-failed",
+            level: "error",
+            message:
+              error instanceof Error ? error.message : "Evaluation failed.",
+          });
           log("warn", "evaluation_failed", {
             jobId: job.id,
             message: error instanceof Error ? error.message : "unknown",
@@ -171,6 +216,13 @@ async function main() {
         const now = payload.requestedAt
           ? new Date(payload.requestedAt)
           : new Date();
+        for (const company of await pendingCompanies(db, now)) {
+          await boss.send(
+            queueNames.resolveCompany,
+            { userId: company.userId, candidateId: company.id },
+            { singletonKey: `resolve:${company.id}` },
+          );
+        }
         const result = await runScheduleTick(
           db,
           async (next: ScanSourceJob, key: string) => {
@@ -198,6 +250,11 @@ async function main() {
         const now = payload.requestedAt
           ? new Date(payload.requestedAt)
           : new Date();
+        await recordActivity(db, {
+          actor: "Worker",
+          stage: "maintenance",
+          message: "Running expired-record cleanup and due in-app digests.",
+        });
         log("info", "housekeeping_completed", {
           jobId: job.id,
           ...(await runHousekeeping(db, now)),
@@ -225,6 +282,12 @@ async function main() {
     }
   };
   await heartbeat();
+  await recordActivity(db, {
+    actor: "Worker",
+    stage: "worker-start",
+    message:
+      "Worker started: company discovery, scheduled scans, evaluation and maintenance are available.",
+  });
   const heartbeatTimer = setInterval(() => void heartbeat(), 60_000);
 
   let stopping = false;
@@ -233,6 +296,11 @@ async function main() {
     stopping = true;
     log("info", "worker_stopping", { signal });
     clearInterval(heartbeatTimer);
+    await recordActivity(db, {
+      actor: "Worker",
+      stage: "worker-stop",
+      message: "Worker is stopping; queued work will resume on restart.",
+    });
     try {
       await boss.stop({ graceful: true, timeout: 30_000 });
     } finally {

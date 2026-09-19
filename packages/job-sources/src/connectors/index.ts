@@ -1,6 +1,21 @@
+export { createAdzunaConnector } from "./adzuna";
 export { createAshbyConnector } from "./ashby";
 export { createGreenhouseConnector } from "./greenhouse";
+export { createHimalayasConnector } from "./himalayas";
 export { createJsonLdConnector } from "./json-ld";
 export { createLeverConnector } from "./lever";
+export { createPersonioConnector, personioBoardHost } from "./personio";
 export { createRemoteOkConnector } from "./remote-ok";
+export { createRemotiveConnector } from "./remotive";
+export { createRipplingConnector } from "./rippling";
+export { createSmartRecruitersConnector } from "./smartrecruiters";
+export { createTheMuseConnector } from "./the-muse";
+export { createUsaJobsConnector } from "./usajobs";
+export { createWeWorkRemotelyConnector } from "./we-work-remotely";
+export { createWorkableConnector } from "./workable";
 export { createJobicyConnector } from "./jobicy";
+export { createBrowserConnector } from "./browser";
+export {
+  createCapturedApiConnector,
+  maxJobs as capturedApiMaxJobs,
+} from "./captured-api";

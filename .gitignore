@@ -9,3 +9,7 @@ playwright-report/
 *.tsbuildinfo
 .DS_Store
 *.log
+
+.cache/
+
+.vitest/

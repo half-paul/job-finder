@@ -1,3 +1,18 @@
+# Two networks, not one, so the isolation the crawler needs is a network fact
+# and not just an absent environment variable. `app` carries Postgres traffic;
+# `crawler-net` is the only network the crawler joins. The crawler therefore
+# has no route to `postgres` or to `web` at the Compose level, in addition to
+# never being given DATABASE_URL. `worker` is the only service on both
+# networks, because it alone needs to reach both Postgres and the crawler.
+#
+# This is what Compose can genuinely enforce: which services can talk to which
+# other services. It does NOT, and cannot, restrict the crawler's OUTBOUND
+# egress by destination IP range — see doc/architecture.md's "Crawler
+# isolation boundary" section for the host/cloud-level control that requires
+# and why the crawler's own address checks are mitigation, not prevention.
+networks:
+  app:
+  crawler-net:
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -14,6 +29,8 @@ services:
       interval: 3s
       timeout: 5s
       retries: 20
+    networks:
+      - app
   migrate:
     build: .
     command: npm run db:migrate
@@ -22,6 +39,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - app
   web:
     build: .
     command: npm run start
@@ -47,6 +66,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    networks:
+      - app
   worker:
     build: .
     command: npm run worker
@@ -56,11 +77,71 @@ services:
     environment:
       DATABASE_URL: postgresql://jobfinder:local-development-only@postgres:5432/jobfinder
       APP_ORIGIN: http://localhost:3000
+      CRAWLER_URL: http://crawler:4000
+      CRAWLER_SECRET: local-development-only
     # Scheduled scans, evaluation, digest and cleanup run here and nowhere else.
     # No ports are published; the worker only talks to PostgreSQL and providers.
     depends_on:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    # The only service on both networks: it owns the database connection and
+    # is the sole caller of the crawler.
+    networks:
+      - app
+      - crawler-net
+  crawler:
+    build:
+      context: .
+      dockerfile: apps/crawler/Dockerfile
+    command: npm run crawler
+    # Deliberately no `env_file`, unlike every other service here: this
+    # container's whole job is rendering untrusted pages, so it must not be
+    # able to receive DATABASE_URL, OPENAI_API_KEY or anything else an
+    # operator's .env.local happens to hold. It needs exactly PORT,
+    # CRAWLER_SECRET and NODE_ENV, all inline below — nothing implicit.
+    # (Fix round 2: `env_file` used to be listed here "for completeness"
+    # with the other services; that was the actual hole behind the
+    # AGENTS.md/architecture.md "never given DATABASE_URL" claim, since
+    # `env_file` loads the whole file regardless of which keys the comment
+    # says are excluded. It was also M1's root cause: with no `.env.local`
+    # reaching this container, CRAWLER_INSECURE_TEST_HOSTNAME/
+    # CRAWLER_INSECURE_TLS/NODE_TLS_REJECT_UNAUTHORIZED now have no ordinary
+    # configuration path at all, and the NODE_ENV refusal below is belt to
+    # that braces rather than the only barrier.)
+    environment:
+      PORT: "4000"
+      CRAWLER_SECRET: local-development-only
+      # Load-bearing, not cosmetic: apps/crawler/src/policy.ts and session.ts
+      # refuse their test-only insecure-SSRF/TLS escape hatches outright
+      # whenever NODE_ENV is "production". With `env_file` gone this is no
+      # longer the only thing standing between an operator's own
+      # configuration and those escape hatches, but it stays as defence in
+      # depth (and is the only thing that stops someone re-adding env_file
+      # later without also re-opening this hole).
+      NODE_ENV: production
+    # Deliberately no DATABASE_URL and no published port: the crawler runs
+    # untrusted pages and must not be able to reach PostgreSQL or the host.
+    # host.docker.internal is resolvable on Docker Desktop but not on Linux CI;
+    # tests/e2e/crawler.spec.ts serves its fixture origin there. compose.e2e.yaml
+    # (never applied here) adds the extra_hosts entry and test-only overrides
+    # that e2e run needs; this production-shaped definition stays clean.
+    healthcheck:
+      # Unauthenticated on purpose (see /health in apps/crawler/src/index.ts):
+      # a probe that needed the bearer secret would be useless to Compose,
+      # and this endpoint exposes nothing beyond liveness and identity.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:4000/health').then(r=>r.json()).then(d=>process.exit(d.service==='jobfinder-crawler'?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    networks:
+      - crawler-net
 volumes:
   postgres-data:

@@ -7,3 +7,5 @@ export * from "./notifications";
 export * from "./digest";
 export * from "./cleanup";
 export * from "./diagnostics";
+export * from "./activity";
+export * from "./companies";
