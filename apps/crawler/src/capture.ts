@@ -173,6 +173,12 @@ export async function captureFromSession(
 export async function runCapture(input: {
   url: string;
 }): Promise<CaptureResponse> {
+  // See `runCrawl`: the total the client is promised is measured from the
+  // moment the request arrives, lock wait included, not from whenever this
+  // host's turn comes round.
+  const arrivedAt = Date.now();
   const origin = new URL(input.url);
-  return withSession(origin, (session) => captureFromSession(session, origin));
+  return withSession(origin, (session) => captureFromSession(session, origin), {
+    arrivedAt,
+  });
 }

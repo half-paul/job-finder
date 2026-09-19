@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  crawlClientTimeoutMs,
   crawlLoadCostMs,
+  crawlLockWaitMs,
   crawlLoadsPerSession,
   crawlMaxJobs,
   crawlMaxPages,
@@ -9,6 +11,10 @@ import {
   crawlResponseSchema,
   crawlSessionBudgetMs,
   crawlSessionOverheadMs,
+  crawlSessionOverrunMs,
+  crawlTimeoutMarginMs,
+  crawlTransportOverheadMs,
+  crawlWorstCaseRequestMs,
   type CrawlRequest,
 } from "@jobfinder/shared";
 import { crawlFromSession } from "../../apps/crawler/src/crawl";
@@ -96,15 +102,16 @@ describe("crawl truncation", () => {
     </body></html>`;
 
   /** What `session.ts` throws once the wall-clock budget is gone. */
+  const budgetSeconds = Math.round(crawlSessionBudgetMs / 1000);
   const budgetExpired = () =>
     new CrawlerFailure(
-      "Crawl session budget of 90s exhausted",
+      `Crawl session budget of ${budgetSeconds}s exhausted`,
       "timeout",
       true,
     );
 
   it("returns the postings already read when the session budget expires", async () => {
-    // The defect this pins: a crawl that simply runs out of its 60/90-second
+    // The defect this pins: a crawl that simply runs out of its session
     // budget is the NORMAL end of a real board walk, not an edge case. It
     // used to re-throw, so the worker got a 422 and every posting already
     // extracted was discarded — making the `complete: false` truncation
@@ -119,7 +126,11 @@ describe("crawl truncation", () => {
 
     expect(result.jobs.map((j) => j.title)).toEqual(["Role One", "Role Two"]);
     expect(result.complete).toBe(false);
-    expect(result.warnings.some((w) => /budget of 90s/.test(w))).toBe(true);
+    expect(
+      result.warnings.some((w) =>
+        new RegExp(`budget of ${budgetSeconds}s`).test(w),
+      ),
+    ).toBe(true);
     expect(() => crawlResponseSchema.parse(result)).not.toThrow();
   });
 
@@ -209,5 +220,94 @@ describe("crawl caps", () => {
     expect(
       crawlRequestSchema.parse({ url: "https://acme.example/careers" }),
     ).toMatchObject({ maxPages: crawlMaxPages, maxJobs: crawlMaxJobs });
+  });
+});
+
+describe("the request's total time", () => {
+  it("keeps lock wait plus session budget plus overhead under the client timeout", () => {
+    // The defect this pins: the session budget started AFTER the per-host
+    // lock was acquired, so two companies on one host cost roughly two full
+    // budgets end to end — about 180 s against a 120 s client timeout. The
+    // worker aborted the second crawl and got nothing for a connection it
+    // had held for two minutes. Both halves of that sum now live in
+    // `packages/shared/src/crawler.ts`, and the client reads its timeout
+    // from there too, so an edit to either side fails here instead of
+    // shipping.
+    expect(
+      crawlLockWaitMs +
+        crawlSessionBudgetMs +
+        crawlSessionOverrunMs +
+        crawlTransportOverheadMs,
+    ).toBe(crawlWorstCaseRequestMs);
+    expect(crawlWorstCaseRequestMs).toBeLessThan(crawlClientTimeoutMs);
+  });
+
+  it("leaves real margin rather than landing exactly on the timeout", () => {
+    // Sized to 120 s exactly, every bit of ordinary jitter becomes a
+    // client-side abort, which is the failure this whole change exists to
+    // remove.
+    expect(crawlTimeoutMarginMs).toBe(
+      crawlClientTimeoutMs - crawlWorstCaseRequestMs,
+    );
+    expect(crawlTimeoutMarginMs).toBeGreaterThanOrEqual(10_000);
+  });
+});
+
+describe("extraction caps are reported, not silent", () => {
+  const origin = new URL("https://acme.example/careers");
+
+  it("warns and reports incomplete when a listing page exceeds the link cap", async () => {
+    // R4: `maxAnchors`/`maxScannedTags` used to stop extraction and return
+    // with no warning and no effect on `complete` — a silent truncation, the
+    // one class of refusal this service is not allowed to make.
+    const job = new URL("https://acme.example/careers/job/role-1000");
+    const filler = '<a href="/about">About</a>'.repeat(10_001);
+    const listingHtml = `<html><body><a href="${job.pathname}">Role</a>${filler}</body></html>`;
+
+    const result = await crawlFromSession(
+      fakeSession({
+        [origin.href]: listingHtml,
+        [job.href]: postingHtml("Role One"),
+      }),
+      origin,
+      input,
+    );
+
+    // Not a throw, and not an empty answer: the links read before the cap
+    // are still returned.
+    expect(result.jobs.map((j) => j.title)).toEqual(["Role One"]);
+    expect(result.complete).toBe(false);
+    const truncation = result.warnings.filter((w) =>
+      w.startsWith("Only part of the listing at"),
+    );
+    // One warning, not one per scan: `postingLinks` and `nextPageLink` both
+    // walk this document and both hit the same cap.
+    expect(truncation).toHaveLength(1);
+    expect(truncation[0]).toContain("more than 10000 links");
+    expect(truncation[0]!.length).toBeLessThanOrEqual(500);
+    expect(() => crawlResponseSchema.parse(result)).not.toThrow();
+  });
+
+  it("warns and reports incomplete when a posting page exceeds the tag cap", async () => {
+    const job = new URL("https://acme.example/careers/job/role-2000");
+    const listingHtml = `<html><body><a href="${job.pathname}">Role</a></body></html>`;
+    const huge = `<html><body><h1>Role Two</h1>${"<p>x</p>".repeat(200_000)}</body></html>`;
+
+    const result = await crawlFromSession(
+      fakeSession({ [origin.href]: listingHtml, [job.href]: huge }),
+      origin,
+      input,
+    );
+
+    expect(result.jobs.map((j) => j.title)).toEqual(["Role Two"]);
+    expect(result.complete).toBe(false);
+    expect(
+      result.warnings.some(
+        (w) =>
+          w.startsWith("Only part of the posting at") &&
+          w.includes("more than 300000 HTML tags"),
+      ),
+    ).toBe(true);
+    expect(() => crawlResponseSchema.parse(result)).not.toThrow();
   });
 });

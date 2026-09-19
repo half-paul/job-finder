@@ -18,6 +18,67 @@ export const crawledJobSchema = z.object({
 export type CrawledJob = z.infer<typeof crawledJobSchema>;
 
 /**
+ * ## The request's total time, and the one number the client shares
+ *
+ * The budget below governs a *session*, and a session only starts once the
+ * per-host lock in `apps/crawler/src/session.ts` has been acquired. That is
+ * not the same thing as the request's duration, and the difference was a
+ * real bug: two companies on one host arrive together, the second waits out
+ * the whole of the first crawl and only *then* starts its own full budget.
+ * At the old numbers that is roughly 90 s of waiting plus 90 s of crawling
+ * against a client that gives up at 120 s, so the worker aborted the second
+ * crawl and got nothing — after holding a connection open for two minutes.
+ *
+ * So the bound is written here, from request arrival rather than from lock
+ * acquisition, as an addition the compiler and the test suite can both see:
+ *
+ *     lock wait      15 s   how long a request will queue behind another
+ *                           crawl of the same host before refusing
+ *   + session budget 75 s   the wall clock `session.ts` hands `open()`
+ *   + session overrun 10 s  work that still runs after the deadline: the
+ *                           last page's `networkidle` settle (5 s), its
+ *                           content read and the context teardown
+ *   + transport       5 s   HTTP framing, JSON encode/decode of the
+ *                           response, the Compose bridge hop
+ *   ------------------------
+ *   = worst case    105 s   against a 120 s client timeout, so 15 s of
+ *                           margin that nothing is allowed to spend
+ *
+ * `crawlClientTimeoutMs` is exported and read by
+ * `packages/job-sources/src/crawler-client.ts` rather than restated there,
+ * because the two sides drifting apart is precisely what created the bug.
+ * `tests/unit/crawler-crawl.test.ts` asserts the sum, so an edit to either
+ * side fails the suite instead of shipping.
+ *
+ * The lock wait is deliberately short. It is not sized to let a queued
+ * request actually get its turn — at a 75 s budget it usually will not —
+ * because a fast, typed refusal is a better answer than a held connection:
+ * the worker learns the host is busy, can retry later, and the user sees a
+ * real reason instead of an abort with nothing attached.
+ */
+
+/**
+ * The crawler client's request timeout. Every other number in this section
+ * is chosen to fit inside it with margin to spare.
+ */
+export const crawlClientTimeoutMs = 120_000;
+/**
+ * How long a request will wait for another crawl of the same host to finish
+ * before refusing with `kind: "timeout"`. Counted from request arrival, not
+ * from any later point — see `withSession` in `apps/crawler/src/session.ts`.
+ */
+export const crawlLockWaitMs = 15_000;
+/**
+ * Work that can still run after the session deadline has passed, because the
+ * deadline is checked when a page load *starts*: the final page's
+ * `networkidle` settle (5 s), its `page.content()` read, the navigation
+ * latch's outstanding DNS lookups, and closing the browser context.
+ */
+export const crawlSessionOverrunMs = 10_000;
+/** HTTP framing, JSON encode/decode, and the hop across the Compose bridge. */
+export const crawlTransportOverheadMs = 5_000;
+
+/**
  * ## One browser session's budget, and the caps derived from it
  *
  * These numbers used to be chosen in two different places — the session
@@ -32,25 +93,25 @@ export type CrawledJob = z.infer<typeof crawledJobSchema>;
  * both import from this one place rather than restating a number.
  *
  * The reconciliation moves both ways. The gap comes down from 2 s to 1 s and
- * the budget up from 60 s to 90 s, which is still comfortably inside the
- * crawler client's 120 s request timeout (`crawler-client.ts`) so the client
- * never aborts a session that would otherwise have finished. The caps then
- * come *down* a long way to whatever that actually buys, because the
- * alternative — a budget large enough for 520 loads — is over half an hour
- * of held browser context and host lock per company, which no HTTP request
- * in this system is willing to wait for.
+ * the budget up from 60 s to 75 s, which leaves room inside the crawler
+ * client's request timeout for the bounded same-host lock wait as well (see
+ * the section above) so the client never aborts a session that would
+ * otherwise have finished. The caps then come *down* a long way to whatever
+ * that actually buys, because the alternative — a budget large enough for
+ * 520 loads — is over half an hour of held browser context and host lock per
+ * company, which no HTTP request in this system is willing to wait for.
  *
- * What that buys is roughly twenty postings from a three-page walk. That is
- * a real limitation and it is stated rather than hidden: the browser rung is
- * the last resort for a small company with no ATS and no captured API, where
- * a careers page of a handful of roles across one to three pages is the
- * normal case. Anything larger should be reached by the captured-API rung,
+ * What that buys is roughly fourteen postings from a three-page walk. That
+ * is a real limitation and it is stated rather than hidden: the browser rung
+ * is the last resort for a small company with no ATS and no captured API,
+ * where a careers page of a handful of roles across one to three pages is
+ * the normal case. Anything larger should be reached by the captured-API rung,
  * which has no browser and no politeness gap and keeps its own 500-job cap.
  * A walk that stops at these caps reports `complete: false`, and the browser
  * connector already sets `canMarkRemovals: false` unconditionally, so a
  * truncated view can never retire a posting.
  */
-export const crawlSessionBudgetMs = 90_000;
+export const crawlSessionBudgetMs = 75_000;
 /** Minimum interval between the *starts* of two page loads on one host. */
 export const crawlMinGapMs = 1_000;
 /**
@@ -63,7 +124,21 @@ export const crawlLoadCostMs = 2_500;
 /** Budget spent before the first load: browser launch, robots.txt, teardown. */
 export const crawlSessionOverheadMs = 15_000;
 
-/** Page loads one session can complete inside its budget: 21. */
+/** Longest a `/crawl` or `/capture` request can take the crawler: 105 s. */
+export const crawlWorstCaseRequestMs =
+  crawlLockWaitMs +
+  crawlSessionBudgetMs +
+  crawlSessionOverrunMs +
+  crawlTransportOverheadMs;
+/**
+ * What is left of the client's patience once the worst case is spent: 15 s.
+ * Kept comfortably positive on purpose — sizing the budget to land exactly on
+ * 120 s would make every ordinary bit of jitter a client-side abort.
+ */
+export const crawlTimeoutMarginMs =
+  crawlClientTimeoutMs - crawlWorstCaseRequestMs;
+
+/** Page loads one session can complete inside its budget: 17. */
 export const crawlLoadsPerSession = Math.floor(
   (crawlSessionBudgetMs - crawlSessionOverheadMs) /
     (crawlMinGapMs + crawlLoadCostMs),

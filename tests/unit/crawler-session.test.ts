@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { chromium, type Browser, type BrowserContext } from "playwright";
 import { CrawlerFailure } from "../../apps/crawler/src/failure";
 import {
+  acquireHostLock,
   createNavigationLatch,
   createSession,
   disableWorkers,
@@ -262,4 +263,80 @@ describe("crawler session enforcement", () => {
       await page.close();
     }
   }, 60_000);
+});
+
+/**
+ * The bug these cover: the session deadline started once the per-host lock
+ * was acquired, so two companies on one host crawled back to back — the
+ * second waited out the whole of the first and only then began its own full
+ * budget. Against `crawlClientTimeoutMs` that meant the worker aborted a
+ * crawl that was doing real work, after holding the connection for two
+ * minutes and getting nothing. A bounded wait turns that into a fast, typed
+ * refusal the worker can retry.
+ *
+ * No browser here: `acquireHostLock` is the whole mechanism, separated from
+ * `withSession` precisely so this can be proven without launching Chromium.
+ * Each test uses its own hostname, because the lock map is module state.
+ */
+describe("the per-host lock", () => {
+  it("refuses a second crawl of a busy host rather than queueing behind it", async () => {
+    const host = "busy.example";
+    const held = await acquireHostLock(host, 1_000);
+
+    const started = Date.now();
+    const refusal = await acquireHostLock(host, 50).catch(
+      (error: unknown) => error,
+    );
+
+    expect(refusal).toBeInstanceOf(CrawlerFailure);
+    const failure = refusal as CrawlerFailure;
+    expect(failure.kind).toBe("timeout");
+    expect(failure.message).toContain(
+      `Another crawl is already in progress for ${host}`,
+    );
+    // The point of the bound: it returns in its own window, not the
+    // holder's. Generous here so a loaded CI box cannot flake it, and still
+    // two orders of magnitude below the client timeout it exists to respect.
+    expect(Date.now() - started).toBeLessThan(2_000);
+
+    held.release();
+  });
+
+  it("lets the next request through once the holder releases", async () => {
+    const host = "sequential.example";
+    const first = await acquireHostLock(host, 1_000);
+    let acquired = false;
+    const second = acquireHostLock(host, 5_000).then((lock) => {
+      acquired = true;
+      return lock;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(acquired).toBe(false);
+
+    first.release();
+    (await second).release();
+    expect(acquired).toBe(true);
+  });
+
+  it("does not leave the host locked after a refusal", async () => {
+    // A refusal that poisoned the host would be worse than the queueing it
+    // replaced: every later crawl of that company would be declined forever.
+    const host = "recovers.example";
+    const held = await acquireHostLock(host, 1_000);
+    await expect(acquireHostLock(host, 25)).rejects.toBeInstanceOf(
+      CrawlerFailure,
+    );
+    held.release();
+
+    const after = await acquireHostLock(host, 1_000);
+    after.release();
+  });
+
+  it("keeps one host's refusal away from another host", async () => {
+    const held = await acquireHostLock("one.example", 1_000);
+    const other = await acquireHostLock("two.example", 25);
+    other.release();
+    held.release();
+  });
 });

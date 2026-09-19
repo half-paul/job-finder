@@ -16,7 +16,11 @@ import {
   resolvesToPublicAddress,
   type HopRefusal,
 } from "./policy";
-import { crawlMinGapMs, crawlSessionBudgetMs } from "@jobfinder/shared";
+import {
+  crawlLockWaitMs,
+  crawlMinGapMs,
+  crawlSessionBudgetMs,
+} from "@jobfinder/shared";
 import { CrawlerFailure } from "./failure";
 import { fetchRobots } from "./robots";
 
@@ -453,6 +457,97 @@ export function disableWorkers(): void {
 /** One session per host at a time; a second request for the host waits. */
 const hostLocks = new Map<string, Promise<unknown>>();
 
+/** Held by whoever is crawling a host. Releasing twice is a no-op. */
+export interface HostLock {
+  release(): void;
+}
+
+/**
+ * Acquires the per-host lock, or refuses.
+ *
+ * The wait is bounded, and that bound is the whole point. Before it existed,
+ * a second request for a host already being crawled simply queued: it waited
+ * out the first crawl's entire session budget and only then started its own,
+ * so the *total* could be twice the budget against a client
+ * (`crawler-client.ts`) that gives up at `crawlClientTimeoutMs`. The worker
+ * therefore aborted a crawl that was doing real work, and got nothing back
+ * for a connection it had held for two minutes.
+ *
+ * A refusal here is a far better answer than that. It is fast, it is typed,
+ * it says in plain language that the host is busy, and the worker can retry
+ * it later; an abort says nothing at all. `timeout` is the honest `kind` for
+ * it out of `crawlerErrorKinds` — the request ran out of the time it was
+ * willing to wait — and the shared enum is deliberately not widened for one
+ * more shade of the same thing.
+ *
+ * Giving up does not deadlock the host. `ours` is resolved on the way out, so
+ * anything already chained behind this attempt proceeds the moment the
+ * *current* holder finishes; and the map entry is only dropped once `gate`
+ * settles, because dropping it while the current holder is still crawling
+ * would let the next arrival run concurrently with it — the one thing this
+ * lock exists to prevent.
+ */
+export async function acquireHostLock(
+  host: string,
+  waitMs: number,
+): Promise<HostLock> {
+  const previous = hostLocks.get(host) ?? Promise.resolve();
+
+  // The resolver must exist before we ever `await`. Deriving `gate` from a
+  // `.then()` callback (as a naive version does) only assigns the resolver
+  // once that callback runs, which is not guaranteed to have happened by the
+  // time the wait below resumes — leaving `release` possibly undefined when
+  // the caller's `finally` calls it. Building the promise and capturing its
+  // resolver synchronously, then publishing it to the map, removes that gap
+  // entirely: by the time anything can await this session, the release
+  // function already exists.
+  let finish!: () => void;
+  const ours = new Promise<void>((resolve) => (finish = resolve));
+  const gate = previous.then(() => ours);
+  hostLocks.set(host, gate);
+
+  // Only the last waiter's release should clear the map entry. If another
+  // call arrived while we held the lock, it already replaced our `gate` with
+  // its own in the map (using `gate` as its `previous`); deleting the key in
+  // that case would drop its lock entirely. Comparing by identity tells us
+  // whether we are still the most recent entry for this host.
+  const dropIfOurs = () => {
+    if (hostLocks.get(host) === gate) hostLocks.delete(host);
+  };
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // `previous` is built only from `.then()` callbacks that cannot reject, so
+  // this race settles one way or the other and never throws.
+  const acquired = await Promise.race<boolean>([
+    previous.then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), Math.max(0, waitMs));
+    }),
+  ]);
+  clearTimeout(timer);
+
+  if (!acquired) {
+    finish();
+    void gate.then(dropIfOurs);
+    throw new CrawlerFailure(
+      `Another crawl is already in progress for ${host}; declined after waiting ${Math.round(
+        waitMs / 1000,
+      )}s for that host's turn. Try this company again shortly.`,
+      "timeout",
+    );
+  }
+
+  let released = false;
+  return {
+    release() {
+      if (released) return;
+      released = true;
+      finish();
+      dropIfOurs();
+    },
+  };
+}
+
 let shared: Browser | null = null;
 async function browser(): Promise<Browser> {
   if (!shared || !shared.isConnected())
@@ -460,35 +555,49 @@ async function browser(): Promise<Browser> {
   return shared;
 }
 
+export interface WithSessionOptions {
+  /**
+   * Wall-clock instant the request arrived, captured by `runCrawl`/
+   * `runCapture` *before* the lock is awaited. Everything this request is
+   * allowed to spend — queueing plus crawling — is measured from here, which
+   * is what keeps the total inside the client's timeout. Defaults to now for
+   * callers with no HTTP request behind them (tests).
+   */
+  arrivedAt?: number;
+  /** How long to queue behind another crawl of this host; tests shorten it. */
+  lockWaitMs?: number;
+}
+
 export async function withSession<T>(
   origin: URL,
   run: (session: Session) => Promise<T>,
+  options: WithSessionOptions = {},
 ): Promise<T> {
-  const host = origin.hostname;
-  const previous = hostLocks.get(host) ?? Promise.resolve();
-
-  // The resolver must exist before we ever `await`. Deriving `gate` from a
-  // `.then()` callback (as a naive version does) only assigns the resolver
-  // once that callback runs, which is not guaranteed to have happened by the
-  // time `await previous` below resumes — leaving `release` possibly
-  // undefined when `finally` calls it. Building the promise and capturing its
-  // resolver synchronously, then publishing it to the map, removes that gap
-  // entirely: by the time anything can await this session, the release
-  // function already exists.
-  let release!: () => void;
-  const ours = new Promise<void>((resolve) => (release = resolve));
-  const gate = previous.then(() => ours);
-  hostLocks.set(host, gate);
-  await previous;
+  const arrivedAt = options.arrivedAt ?? Date.now();
+  const lockWaitMs = options.lockWaitMs ?? crawlLockWaitMs;
+  // Throws a typed "another crawl is in progress" refusal rather than
+  // queueing indefinitely; nothing below runs, and nothing needs releasing,
+  // because the lock was never taken.
+  const lock = await acquireHostLock(origin.hostname, lockWaitMs);
 
   // Everything from here on must be inside the try: fetchRobots routinely
   // throws (a 401/403 robots.txt is an expected outcome, not an edge case),
-  // and anything that throws before the lock is held by a `finally` leaves
-  // `ours` unresolved forever — a permanent deadlock for this host, plus a
-  // permanent `hostLocks` entry the identity-guarded delete can never reach.
+  // and anything that throws before the lock is released by a `finally`
+  // leaves `ours` unresolved forever — a permanent deadlock for this host,
+  // plus a permanent `hostLocks` entry the identity-guarded delete can never
+  // reach.
   let context: BrowserContext | undefined;
   try {
-    const deadline = Date.now() + sessionBudgetMs;
+    // Two bounds, whichever is tighter. `Date.now() + sessionBudgetMs` is the
+    // session's own allowance; `arrivedAt + lockWaitMs + sessionBudgetMs` is
+    // the promise made to the client, measured from when the request arrived
+    // rather than from whenever this session happened to get its turn. They
+    // agree by construction today — the lock wait is what it is — and the
+    // `min` is what keeps them agreeing if either number moves.
+    const deadline = Math.min(
+      Date.now() + sessionBudgetMs,
+      arrivedAt + lockWaitMs + sessionBudgetMs,
+    );
     const rules = await fetchRobots(origin);
     context = await (
       await browser()
@@ -614,12 +723,6 @@ export async function withSession<T>(
     // browser launch threw before newContext ever ran — so this must be
     // optional, not `context.close()`.
     await context?.close().catch(() => {});
-    release();
-    // Only the last waiter's release should clear the map entry. If another
-    // call arrived while we held the lock, it already replaced our `gate`
-    // with its own in the map (using `gate` as its `previous`); deleting the
-    // key in that case would drop its lock entirely. Comparing by identity
-    // tells us whether we are still the most recent entry for this host.
-    if (hostLocks.get(host) === gate) hostLocks.delete(host);
+    lock.release();
   }
 }

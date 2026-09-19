@@ -15,7 +15,7 @@ describe("crawler extraction", () => {
 
   it("keeps posting links and drops navigation and third-party links", () => {
     expect(
-      postingLinks(fixture("listing.html"), base).map((u) => u.href),
+      postingLinks(fixture("listing.html"), base).value.map((u) => u.href),
     ).toEqual([
       "https://acme.example/careers/job/staff-engineer-1234",
       "https://acme.example/careers/job/designer-5678",
@@ -23,20 +23,20 @@ describe("crawler extraction", () => {
   });
 
   it("finds a rel=next pagination link", () => {
-    expect(nextPageLink(fixture("listing.html"), base)?.href).toBe(
+    expect(nextPageLink(fixture("listing.html"), base).value?.href).toBe(
       "https://acme.example/careers?page=2",
     );
   });
 
   it("returns null when pagination is a script-driven button", () => {
-    expect(nextPageLink(fixture("paginated.html"), base)).toBeNull();
+    expect(nextPageLink(fixture("paginated.html"), base).value).toBeNull();
   });
 
   it("reads a posting from the DOM when there is no JSON-LD", () => {
     const posting = extractPosting(
       fixture("posting.html"),
       new URL("https://acme.example/careers/job/staff-engineer-1234"),
-    );
+    ).value;
     expect(posting).toMatchObject({
       title: "Staff Engineer",
       location: "Vancouver, BC",
@@ -50,7 +50,8 @@ describe("crawler extraction", () => {
        "datePosted":"2026-09-01","jobLocation":{"address":{"addressLocality":"Remote"}},"url":"https://acme.example/careers/job/x-1"}
     </script></body></html>`;
     expect(
-      extractPosting(html, new URL("https://acme.example/careers/job/x-1")),
+      extractPosting(html, new URL("https://acme.example/careers/job/x-1"))
+        .value,
     ).toMatchObject({ title: "Right Title", postedAt: "2026-09-01" });
   });
 
@@ -58,7 +59,7 @@ describe("crawler extraction", () => {
     const posting = extractPosting(
       fixture("with-nav.html"),
       new URL("https://acme.example/careers/job/senior-dev-1"),
-    );
+    ).value;
     expect(posting?.description).toContain("Build amazing systems");
     expect(posting?.description).toContain("own the full lifecycle");
     expect(posting?.description).not.toContain("Home");
@@ -72,7 +73,7 @@ describe("crawler extraction", () => {
     const posting = extractPosting(
       html,
       new URL("https://acme.example/careers/job/x-1"),
-    );
+    ).value;
     expect(posting?.description).toContain("You'll build");
     expect(posting?.description).toContain("tools & systems");
     expect(posting?.description).not.toContain("&apos;");
@@ -83,7 +84,7 @@ describe("crawler extraction", () => {
     const posting = extractPosting(
       fixture("tier-2-main.html"),
       new URL("https://acme.example/careers/job/senior-eng-1"),
-    );
+    ).value;
     expect(posting?.description).toContain("architect scalable systems");
     expect(posting?.description).toContain("distributed systems");
     expect(posting?.description).not.toContain("Home");
@@ -93,7 +94,7 @@ describe("crawler extraction", () => {
     const posting = extractPosting(
       fixture("tier-3-no-container.html"),
       new URL("https://acme.example/careers/job/marketing-1"),
-    );
+    ).value;
     expect(posting?.description).toContain("Lead our marketing team");
     expect(posting?.description).toContain("drive growth initiatives");
     expect(posting?.description).not.toContain("Home");
@@ -104,7 +105,7 @@ describe("crawler extraction", () => {
     const posting = extractPosting(
       fixture("nested-description.html"),
       new URL("https://acme.example/careers/job/pm-1"),
-    );
+    ).value;
     expect(posting?.description).toContain("Paragraph one");
     expect(posting?.description).toContain("Paragraph two");
     expect(posting?.description).toContain("Paragraph three");
@@ -235,14 +236,61 @@ describe("extraction on pathological HTML", () => {
       <span class="location">Vancouver, BC</span>
       <div class="description">A real role.</div>
       ${repeatTo("<a", 1024 * 1024)}</body></html>`;
-    let posting: ReturnType<typeof extractPosting> = null;
+    let posting: ReturnType<typeof extractPosting>["value"] = null;
     withinBudget("extractPosting/mixed", () => {
-      posting = extractPosting(html, base);
+      posting = extractPosting(html, base).value;
     });
     expect(posting).toMatchObject({
       title: "Staff Engineer",
       location: "Vancouver, BC",
       description: "A real role.",
     });
+  });
+});
+
+/**
+ * R4: `maxScannedTags` and `maxAnchors` bound the scans in `extract.ts` and
+ * are worth keeping — a single-threaded process cannot afford an unbounded
+ * walk over an untrusted page. What they must not do is stop early and say
+ * nothing. These pin the reporting itself; `tests/unit/crawler-crawl.test.ts`
+ * pins what `crawl.ts` does with it (a bounded warning and `complete: false`).
+ */
+describe("extraction caps report what they cut short", () => {
+  const base = new URL("https://acme.example/careers");
+
+  it("reports the anchor cap and still returns the links read before it", () => {
+    const html = `<a href="/careers/job/real-1234">Real</a>${'<a href="/about">About</a>'.repeat(
+      10_001,
+    )}`;
+
+    const result = postingLinks(html, base);
+
+    expect(result.value.map((u) => u.href)).toEqual([
+      "https://acme.example/careers/job/real-1234",
+    ]);
+    expect(result.truncated).toHaveLength(1);
+    expect(result.truncated[0]).toContain("more than 10000 links");
+  });
+
+  it("reports the tag cap from both the link scan and the posting read", () => {
+    const html = `<html><body><h1>Role</h1>${"<p>x</p>".repeat(
+      200_000,
+    )}</body></html>`;
+
+    expect(() => postingLinks(html, base)).not.toThrow();
+    expect(postingLinks(html, base).truncated).toContain(
+      "the page has more than 300000 HTML tags, so the scan stopped there",
+    );
+
+    const posting = extractPosting(html, base);
+    expect(posting.value?.title).toBe("Role");
+    expect(posting.truncated.length).toBeGreaterThan(0);
+  });
+
+  it("says nothing when nothing was cut short", () => {
+    const html = fixture("listing.html");
+    expect(postingLinks(html, base).truncated).toEqual([]);
+    expect(nextPageLink(html, base).truncated).toEqual([]);
+    expect(extractPosting(fixture("posting.html"), base).truncated).toEqual([]);
   });
 });

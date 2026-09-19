@@ -1,5 +1,6 @@
 import {
   captureResponseSchema,
+  crawlClientTimeoutMs,
   crawlResponseSchema,
   crawlerErrorSchema,
   type CaptureResponse,
@@ -31,6 +32,7 @@ export interface HttpCrawlerConfig {
   url: string;
   secret: string;
   fetchImpl?: typeof fetch;
+  /** Overrides `crawlClientTimeoutMs`; only tests have a reason to. */
   timeoutMs?: number;
 }
 
@@ -39,7 +41,12 @@ export function createHttpCrawlerClient(
 ): CrawlerClient {
   const base = config.url.replace(/\/$/, "");
   const fetchImpl = config.fetchImpl ?? fetch;
-  const timeout = config.timeoutMs ?? 120_000;
+  // Imported, never restated. The crawler sizes its own lock wait, session
+  // budget and overhead to fit inside this number with margin to spare
+  // (`packages/shared/src/crawler.ts`), and a literal here is exactly how the
+  // two sides drifted far enough apart that a second crawl of the same host
+  // was aborted by this timeout after doing all of its work.
+  const timeout = config.timeoutMs ?? crawlClientTimeoutMs;
   async function call<T>(
     path: string,
     body: unknown,

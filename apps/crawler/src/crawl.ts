@@ -57,7 +57,20 @@ export async function crawlFromSession(
       complete = false;
       break;
     }
-    for (const link of postingLinks(html, listing)) {
+    const links = postingLinks(html, listing);
+    const next = nextPageLink(html, listing);
+    // Both scans walk the same document, so a page big enough to hit a cap
+    // hits it in both; the Set keeps that from spending two of the fifty
+    // warning slots on the same sentence. A cap that truncated is a partial
+    // view of this listing page, so it sets `complete: false` for exactly
+    // the same reason the page and job caps below do.
+    for (const note of new Set([...links.truncated, ...next.truncated])) {
+      warnings.push(
+        `Only part of the listing at ${redactUrl(listing.href)} was read: ${note}`,
+      );
+      complete = false;
+    }
+    for (const link of links.value) {
       if (found.size >= input.maxJobs) {
         complete = false;
         break;
@@ -65,9 +78,8 @@ export async function crawlFromSession(
       found.set(link.href, link);
     }
     if (found.size >= input.maxJobs) break;
-    const next: URL | null = nextPageLink(html, listing);
-    if (next && page + 1 >= input.maxPages) complete = false;
-    listing = next;
+    if (next.value && page + 1 >= input.maxPages) complete = false;
+    listing = next.value;
   }
 
   if (found.size === 0)
@@ -92,7 +104,14 @@ export async function crawlFromSession(
     // 500 for an otherwise-successful run.
     try {
       const html = await session.open(url);
-      const posting = extractPosting(html, url);
+      const extracted = extractPosting(html, url);
+      for (const note of extracted.truncated) {
+        warnings.push(
+          `Only part of the posting at ${redactUrl(url.href)} was read: ${note}`,
+        );
+        complete = false;
+      }
+      const posting = extracted.value;
       if (!posting) {
         warnings.push(`No readable posting at ${redactUrl(url.href)}`);
         complete = false;
@@ -152,8 +171,15 @@ export async function crawlFromSession(
 }
 
 export async function runCrawl(input: CrawlRequest): Promise<CrawlResponse> {
+  // Captured first, before anything can await: the bound the client is
+  // promised covers queueing behind another crawl of this host as well as
+  // the crawl itself, so it has to start when the request arrives rather
+  // than when `withSession` finally wins the lock.
+  const arrivedAt = Date.now();
   const origin = new URL(input.url);
-  return withSession(origin, (session) =>
-    crawlFromSession(session, origin, input),
+  return withSession(
+    origin,
+    (session) => crawlFromSession(session, origin, input),
+    { arrivedAt },
   );
 }

@@ -35,15 +35,71 @@ const maxTagLength = 4096;
 /**
  * A hard stop on the scan itself, independent of the linearity argument
  * above. 8 MB of `<p>` is about 2.6 M tags, so this only bites on documents
- * that are already pathological.
+ * that are already pathological. Reaching it is reported, not swallowed —
+ * see `ExtractionResult` below.
  */
 const maxScannedTags = 300_000;
-/** Anchors considered on one page. A real listing has tens, not thousands. */
+/**
+ * Anchors considered on one page. A real listing has tens, not thousands.
+ * Reaching it is reported the same way `maxScannedTags` is.
+ */
 const maxAnchors = 10_000;
 /** A posting URL longer than this is not one. */
 const maxHrefLength = 2_048;
 /** Anchor text kept for the `next` check; link labels are a few words. */
 const maxAnchorTextLength = 4_096;
+
+/**
+ * What an extraction returns: the value, plus any caps that cut the scan
+ * short before it could see the whole document.
+ *
+ * The caps below (`maxScannedTags`, `maxAnchors`) exist to keep a hostile
+ * page from monopolising a single-threaded process, and they are worth
+ * keeping — but a cap that stops early and says nothing is a silent
+ * refusal, which is the one thing this service is not allowed to do. So
+ * every exported function reports what it gave up on, in plain language,
+ * and `crawl.ts` turns each note into a bounded warning and sets
+ * `complete: false` exactly as it already does for the page and job caps.
+ *
+ * The notes travel back as a return value rather than through a collector
+ * this module writes into: these functions are pure, they are tested as pure
+ * functions, and a module-level counter or a callback into `warnings.ts`
+ * would make the same document extract differently depending on what ran
+ * before it.
+ */
+export interface ExtractionResult<T> {
+  value: T;
+  /** Empty when nothing was cut short. One short sentence fragment each. */
+  truncated: string[];
+}
+
+/**
+ * Per-call, never module-level: one of these is created by each exported
+ * entry point and threaded down through the scans it performs, so two
+ * concurrent extractions cannot see each other's counters.
+ */
+interface ScanLimits {
+  /** A `scanTags` walk stopped at `maxScannedTags`. */
+  tags: boolean;
+  /** An anchor walk stopped at `maxAnchors`. */
+  anchors: boolean;
+}
+
+const newLimits = (): ScanLimits => ({ tags: false, anchors: false });
+
+/** The plain-language notes for whatever the caps actually cut short. */
+function truncationNotes(limits: ScanLimits): string[] {
+  const notes: string[] = [];
+  if (limits.tags)
+    notes.push(
+      `the page has more than ${maxScannedTags} HTML tags, so the scan stopped there`,
+    );
+  if (limits.anchors)
+    notes.push(
+      `the page has more than ${maxAnchors} links, so only the first ${maxAnchors} were examined`,
+    );
+  return notes;
+}
 
 interface Tag {
   /** Lowercased element name: `a`, `div`, `h1`. */
@@ -80,11 +136,18 @@ function isNameChar(code: number): boolean {
  * nothing to be gained by looking, and looking is exactly what the old
  * regexes did n/2 times over.
  */
-function* scanTags(html: string, from = 0): Generator<Tag> {
+function* scanTags(
+  html: string,
+  from: number,
+  limits: ScanLimits,
+): Generator<Tag> {
   let pos = from;
   let scanned = 0;
   while (pos < html.length) {
-    if (scanned >= maxScannedTags) return;
+    if (scanned >= maxScannedTags) {
+      limits.tags = true;
+      return;
+    }
     const start = html.indexOf("<", pos);
     if (start < 0) return;
     const end = html.indexOf(">", start + 1);
@@ -118,8 +181,8 @@ function* scanTags(html: string, from = 0): Generator<Tag> {
  * The first closing tag matching `open`, ignoring nesting — the same thing
  * the old lazy `[\s\S]*?</tag>` matched.
  */
-function firstClose(html: string, open: Tag): Tag | null {
-  for (const tag of scanTags(html, open.contentStart))
+function firstClose(html: string, open: Tag, limits: ScanLimits): Tag | null {
+  for (const tag of scanTags(html, open.contentStart, limits))
     if (tag.closing && tag.name === open.name) return tag;
   return null;
 }
@@ -136,13 +199,17 @@ const postingPath =
   /\/(job|jobs|position|positions|opening|openings|role|roles|career|careers|vacancy|vacancies)\b[^?]*\/[^/?]+|\/[^/?]*-\d{3,}/i;
 
 /** Same-host links that look like an individual posting, in document order. */
-export function postingLinks(html: string, base: URL): URL[] {
+export function postingLinks(html: string, base: URL): ExtractionResult<URL[]> {
+  const limits = newLimits();
   const seen = new Set<string>();
   const links: URL[] = [];
   let anchors = 0;
-  for (const tag of scanTags(html)) {
+  for (const tag of scanTags(html, 0, limits)) {
     if (tag.closing || tag.name !== "a") continue;
-    if (++anchors > maxAnchors) break;
+    if (++anchors > maxAnchors) {
+      limits.anchors = true;
+      break;
+    }
     const raw = hrefPattern.exec(tag.source)?.[1];
     if (!raw || raw.length > maxHrefLength) continue;
     let href: URL;
@@ -159,7 +226,7 @@ export function postingLinks(html: string, base: URL): URL[] {
     seen.add(href.href);
     links.push(href);
   }
-  return links;
+  return { value: links, truncated: truncationNotes(limits) };
 }
 
 const nextMarkers = [/rel=["']next["']/i];
@@ -168,11 +235,18 @@ const nextMarkers = [/rel=["']next["']/i];
  * Only a real link counts. A `Load more` button is script-driven, and the
  * session clicks it rather than navigating, so it is not a page link.
  */
-export function nextPageLink(html: string, base: URL): URL | null {
+export function nextPageLink(
+  html: string,
+  base: URL,
+): ExtractionResult<URL | null> {
+  const limits = newLimits();
   let anchors = 0;
-  for (const tag of scanTags(html)) {
+  for (const tag of scanTags(html, 0, limits)) {
     if (tag.closing || tag.name !== "a") continue;
-    if (++anchors > maxAnchors) break;
+    if (++anchors > maxAnchors) {
+      limits.anchors = true;
+      break;
+    }
     const raw = hrefPattern.exec(tag.source)?.[1];
     if (!raw || raw.length > maxHrefLength) continue;
     // A bounded window rather than `firstClose`: an anchor that is never
@@ -193,12 +267,13 @@ export function nextPageLink(html: string, base: URL): URL | null {
     try {
       const href = new URL(raw, base);
       href.hash = "";
-      if (hostAllowed(href, base) && href.href !== base.href) return href;
+      if (hostAllowed(href, base) && href.href !== base.href)
+        return { value: href, truncated: truncationNotes(limits) };
     } catch {
       continue;
     }
   }
-  return null;
+  return { value: null, truncated: truncationNotes(limits) };
 }
 
 /** Matched against one tag's source, never the page. */
@@ -207,10 +282,10 @@ const descriptionAttr =
   /(?:class|id|data-[a-z-]+)=["'][^"']*description[^"']*["']/i;
 
 /** Text of the first `<h1>`, or "". */
-function firstHeadingText(html: string): string {
-  for (const tag of scanTags(html)) {
+function firstHeadingText(html: string, limits: ScanLimits): string {
+  for (const tag of scanTags(html, 0, limits)) {
     if (tag.closing || tag.name !== "h1") continue;
-    const close = firstClose(html, tag);
+    const close = firstClose(html, tag, limits);
     if (!close) return "";
     return htmlToText(html.slice(tag.contentStart, close.start));
   }
@@ -222,8 +297,8 @@ function firstHeadingText(html: string): string {
  * next closing tag — the old pattern ended at a bare `<\/`, and a single
  * `indexOf` reproduces that without re-scanning.
  */
-function locationText(html: string): string {
-  for (const tag of scanTags(html)) {
+function locationText(html: string, limits: ScanLimits): string {
+  for (const tag of scanTags(html, 0, limits)) {
     if (tag.closing) continue;
     if (!locationAttr.test(tag.source)) continue;
     const end = html.indexOf("</", tag.contentStart);
@@ -239,32 +314,47 @@ function locationText(html: string): string {
  * matching "description"), falls back to <main> or <article>, then strips
  * nav/header/footer before using the rest of the page.
  */
-export function extractPosting(
-  html: string,
-  url: URL,
-): {
+export interface Posting {
   title: string;
   location: string;
   description: string;
   postedAt: string | null;
-} | null {
+}
+
+export function extractPosting(
+  html: string,
+  url: URL,
+): ExtractionResult<Posting | null> {
   void url;
+  const limits = newLimits();
   const [structured] = extractJsonLdJobs(html);
   if (structured?.title.trim()) {
+    // JSON-LD is the site's own structured answer and is read without any
+    // tag scan of ours, so no cap of this module's was reached to report.
     return {
-      title: structured.title.trim(),
-      location: jsonLdLocation(structured),
-      description: htmlToText(structured.description ?? ""),
-      postedAt: structured.datePosted ?? null,
+      value: {
+        title: structured.title.trim(),
+        location: jsonLdLocation(structured),
+        description: htmlToText(structured.description ?? ""),
+        postedAt: structured.datePosted ?? null,
+      },
+      truncated: [],
     };
   }
-  const title = firstHeadingText(html);
-  if (!title) return null;
+  const title = firstHeadingText(html, limits);
+  // Still reported when there is no posting: "nothing readable here" and
+  // "nothing readable in the part of the page we were willing to read" are
+  // different answers, and the caller deserves the second one when it is
+  // true.
+  if (!title) return { value: null, truncated: truncationNotes(limits) };
   return {
-    title,
-    location: locationText(html),
-    description: extractDescription(html).slice(0, 20_000),
-    postedAt: null,
+    value: {
+      title,
+      location: locationText(html, limits),
+      description: extractDescription(html, limits).slice(0, 20_000),
+      postedAt: null,
+    },
+    truncated: truncationNotes(limits),
   };
 }
 
@@ -277,9 +367,12 @@ export function extractPosting(
  * every iteration, which is the same n² shape as the anchor scan above
  * (measured 200 KB of `"<div"` → 16.90 s). `scanTags` visits each tag once.
  */
-function findDescriptionContainer(html: string): string | null {
+function findDescriptionContainer(
+  html: string,
+  limits: ScanLimits,
+): string | null {
   let open: Tag | null = null;
-  for (const tag of scanTags(html)) {
+  for (const tag of scanTags(html, 0, limits)) {
     if (tag.closing) continue;
     if (tag.name !== "div" && tag.name !== "section" && tag.name !== "article")
       continue;
@@ -292,7 +385,7 @@ function findDescriptionContainer(html: string): string | null {
   if (!open) return null;
 
   let depth = 1;
-  for (const tag of scanTags(html, open.contentStart)) {
+  for (const tag of scanTags(html, open.contentStart, limits)) {
     if (tag.name !== open.name) continue;
     if (tag.closing) {
       depth--;
@@ -305,11 +398,11 @@ function findDescriptionContainer(html: string): string | null {
 }
 
 /** Contents of the first `<main>` or `<article>`, or null. */
-function mainContent(html: string): string | null {
-  for (const tag of scanTags(html)) {
+function mainContent(html: string, limits: ScanLimits): string | null {
+  for (const tag of scanTags(html, 0, limits)) {
     if (tag.closing) continue;
     if (tag.name !== "main" && tag.name !== "article") continue;
-    const close = firstClose(html, tag);
+    const close = firstClose(html, tag, limits);
     if (!close) return null;
     return html.slice(tag.contentStart, close.start);
   }
@@ -324,20 +417,20 @@ const strippedElements = new Set(["nav", "header", "footer"]);
  * reason everything else here was (200 KB of `"<nav"` → 14.97 s); this makes
  * one pass and keeps the lazy, nesting-blind semantics the old chain had.
  */
-function stripChrome(html: string): string {
+function stripChrome(html: string, limits: ScanLimits): string {
   const parts: string[] = [];
   let copied = 0;
   let cursor = 0;
   for (;;) {
     let open: Tag | null = null;
-    for (const tag of scanTags(html, cursor)) {
+    for (const tag of scanTags(html, cursor, limits)) {
       if (!tag.closing && strippedElements.has(tag.name)) {
         open = tag;
         break;
       }
     }
     if (!open) break;
-    const close = firstClose(html, open);
+    const close = firstClose(html, open, limits);
     if (!close) break;
     parts.push(html.slice(copied, open.start), " ");
     copied = close.contentStart;
@@ -354,14 +447,14 @@ function stripChrome(html: string): string {
  * 2. The contents of <main> or <article>
  * 3. The whole page with nav, header, footer stripped
  */
-function extractDescription(html: string): string {
-  const descContainer = findDescriptionContainer(html);
+function extractDescription(html: string, limits: ScanLimits): string {
+  const descContainer = findDescriptionContainer(html, limits);
   if (descContainer) return htmlToText(descContainer);
 
-  const main = mainContent(html);
+  const main = mainContent(html, limits);
   if (main) return htmlToText(main);
 
-  return htmlToText(stripChrome(html));
+  return htmlToText(stripChrome(html, limits));
 }
 
 /**
