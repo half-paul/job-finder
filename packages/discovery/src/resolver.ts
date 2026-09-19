@@ -47,6 +47,14 @@ function workdayBoardRoot(url: URL): URL | null {
  * vendor be mistaken for this company's. Used both as a cheap pre-fetch
  * filter (on the candidate link itself) and, more importantly, as the
  * post-fetch gate applied to every redirect hop the candidate actually took.
+ *
+ * Deliberately identity-only: `chain`/`html` are passed empty so this never
+ * inspects page content. If a future ATS vendor's key can only be read from
+ * its page body, do not "fix" that by feeding `linked.text` in here --
+ * `detectAts` also mines anchors and script srcs, so a content-derived key
+ * would let the page assert its own membership in this board, and the gate
+ * would end up validating the claim using the very data it was supposed to
+ * be checking. Handle a vendor like that with an explicit reject instead.
  */
 const isSameBoard = (url: URL, wanted: AtsDetection): boolean => {
   const found = detectAts({ finalUrl: url, chain: [], html: "" });
@@ -181,6 +189,14 @@ export async function resolveCompanyWebsite(
           )
         )
           continue;
+        // The pre-fetch auth check above only saw the candidate's starting
+        // path; a same-board redirect can still land on that board's own
+        // login page (unauthenticated Workday board roots commonly bounce
+        // to one). Re-check the landing spot only, not every hop: an
+        // intermediate auth bounce that ends up somewhere useful is not
+        // obviously wrong, but ending ON an auth page is exactly the thing
+        // this walk must never adopt.
+        if (isAuthPath(linked.finalUrl.pathname)) continue;
         const linkedDetection = detectAts({
           finalUrl: linked.finalUrl,
           chain: linked.chain,

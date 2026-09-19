@@ -606,6 +606,34 @@ describe("resolver edge cases", () => {
     expect(resolution.careersUrl).not.toContain("greenhouse");
   });
 
+  it("does not adopt a same-board candidate that redirects to its own login page", async () => {
+    // Same board throughout (the redirect never leaves acme's Workday
+    // tenant), so the board-identity check alone would let this through.
+    // Unauthenticated Workday board roots commonly bounce to /login; that
+    // landing spot must still be rejected as an auth endpoint.
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers":
+          '<script src="https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs"></script>' +
+          '<a href="https://acme.wd5.myworkdayjobs.com/en-US/Careers">Browse jobs</a>',
+        "https://acme.wd5.myworkdayjobs.com/en-US/Careers": new Response(null, {
+          status: 302,
+          headers: {
+            location: "https://acme.wd5.myworkdayjobs.com/en-US/Careers/login",
+          },
+        }),
+        "https://acme.wd5.myworkdayjobs.com/en-US/Careers/login":
+          "<h1>Sign in</h1>",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
+    });
+  });
+
   it("skips a candidate whose robots.txt cannot be verified, and still resolves", async () => {
     const resolution = await resolveCompanyWebsite("https://acme.example/", {
       fetchImpl: fixtureFetch({
