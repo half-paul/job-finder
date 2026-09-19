@@ -9,8 +9,8 @@ import {
   type PolicyCheck,
   type SupportedAts,
 } from "@jobfinder/shared";
-import { detectAts } from "./ats";
-import { findCareersPage, scoreCareersLinks } from "./careers";
+import { detectAts, type AtsDetection } from "./ats";
+import { atsHostPattern, findCareersPage, scoreCareersLinks } from "./careers";
 import { buildPatternSpec, validatePattern } from "./patterns";
 import { registrableDomain } from "./seed-list";
 import {
@@ -18,6 +18,30 @@ import {
   RobotsCache,
   type DiscoveryFetchResult,
 } from "./transport";
+
+// Once we know which (unsupported) ATS a hub is pointing at, a link to that
+// vendor's host is no longer just "a strong signal" among several -- it is
+// the destination. Outweigh anything same-domain marketing copy can score.
+const DECISIVE_ATS_BONUS = 1000;
+
+// Never adopt an auth or application endpoint as the resolved careers page:
+// it is worse than the marketing page it would replace (nothing to read,
+// and it is not where the captured-API/browser rungs should point).
+const authPathSegment = /^(login|signin|sign-in|register|apply|logout)$/i;
+const isAuthPath = (pathname: string) =>
+  pathname.split("/").some((segment) => authPathSegment.test(segment));
+
+// The one vendor-specific rewrite in this walk: Workday's login path is
+// predictably its board root plus `/login` (`/en-US/{site}/login` ->
+// `/en-US/{site}`). This is narrow and cheaply verified (the caller still
+// fetches the result and requires HTTP 200 before adopting it), unlike
+// guessing at URL shapes for vendors we have not confirmed this pattern for.
+const workdayLoginPath = /^(\/[a-z]{2}-[a-z]{2}\/[^/]+)\/login\/?$/i;
+function workdayBoardRoot(url: URL): URL | null {
+  if (!/\.myworkdayjobs\.com$/i.test(url.hostname)) return null;
+  const match = workdayLoginPath.exec(url.pathname);
+  return match ? new URL(match[1], url) : null;
+}
 
 export interface DiscoveryOptions extends TransportOptions {
   onProgress?: (stage: string, message: string) => Promise<void>;
@@ -80,7 +104,16 @@ export async function resolveCompanyWebsite(
   }
   // Careers hubs may link to department pages before exposing their ATS.
   // Inspect at most three observed destinations before selecting AI fallback.
-  if (!detection && !extractJsonLdJobs(page.text).length) {
+  // A *supported* detection already returns early below, so this only runs
+  // for the unsupported and undetected cases -- and an unsupported detection
+  // (e.g. Workday mentioned in a login link) is exactly when we know the
+  // most useful thing: which ATS host to walk toward.
+  const unsupportedDetection =
+    detection && !isSupportedAts(detection.ats) ? detection : null;
+  if (
+    (!detection || unsupportedDetection) &&
+    !extractJsonLdJobs(page.text).length
+  ) {
     const visited = new Set([
       input.href,
       ...home.chain,
@@ -92,11 +125,29 @@ export async function resolveCompanyWebsite(
       page.text,
       page.finalUrl,
       registrableDomain(page.finalUrl.hostname)!,
+      unsupportedDetection ? { atsBonus: DECISIVE_ATS_BONUS } : undefined,
     )
       .filter((link) => !visited.has(link.url.href))
       .slice(0, 3);
+    // A page on a recognised-but-unsupported ATS host is a lesser outcome
+    // than a supported hit: keep it in reserve while the remaining
+    // candidates are checked, in case one of them is actually supported.
+    let atsHostFallback: {
+      page: DiscoveryFetchResult;
+      detection: AtsDetection | null;
+    } | null = null;
     for (const link of links) {
-      const linked = await discoveryFetch(link.url, fetchOptions);
+      // The candidate's own path, not the eventual redirect target: we
+      // should not even fetch a link that presents itself as a login form.
+      // Workday's is the one shape narrow enough to cheaply rewrite to its
+      // board root instead of discarding outright (see `workdayBoardRoot`).
+      let target = link.url;
+      if (isAuthPath(link.url.pathname)) {
+        const root = workdayBoardRoot(link.url);
+        if (!root) continue;
+        target = root;
+      }
+      const linked = await discoveryFetch(target, fetchOptions);
       if (linked.status !== 200) continue;
       const linkedDetection = detectAts({
         finalUrl: linked.finalUrl,
@@ -106,8 +157,16 @@ export async function resolveCompanyWebsite(
       if (linkedDetection && isSupportedAts(linkedDetection.ats)) {
         page = linked;
         detection = linkedDetection;
+        atsHostFallback = null;
         break;
       }
+      if (!atsHostFallback && atsHostPattern.test(linked.finalUrl.hostname)) {
+        atsHostFallback = { page: linked, detection: linkedDetection };
+      }
+    }
+    if (atsHostFallback) {
+      page = atsHostFallback.page;
+      detection = atsHostFallback.detection;
     }
   }
   const policy = await robots.assertAllowed(page.finalUrl);

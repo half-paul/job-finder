@@ -427,6 +427,76 @@ describe("resolver edge cases", () => {
     });
     expect(resolution).toMatchObject({ strategy: "ai", ats: "Workday" });
   });
+
+  it("never adopts a login-shaped candidate, even one that outscores the real board link", async () => {
+    const fetchImpl = fixtureFetch({
+      "https://acme.example/": '<a href="/careers">Careers</a>',
+      // "Careers Sign In" outscores "Browse Jobs" on text alone; the login
+      // path must still be skipped rather than adopted. iCIMS has no
+      // Workday-shaped board root to rewrite to, so this is a plain skip.
+      "https://acme.example/careers":
+        '<a href="https://acme.icims.com/jobs/login">Careers Sign In</a>' +
+        '<a href="https://acme.icims.com/jobs/search">Browse Jobs</a>',
+      "https://acme.icims.com/jobs/search": "<h1>Open roles</h1>",
+    });
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl,
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "iCIMS",
+      careersUrl: "https://acme.icims.com/jobs/search",
+    });
+    expect(
+      vi.mocked(fetchImpl).mock.calls.map(([url]) => String(url)),
+    ).not.toContain("https://acme.icims.com/jobs/login");
+  });
+
+  it("rewrites a Workday login link to its board root and adopts that page (the manulife.com case)", async () => {
+    const loginUrl =
+      "https://acme.wd3.myworkdayjobs.com/en-US/MFCJH_Jobs/login";
+    const rootUrl = "https://acme.wd3.myworkdayjobs.com/en-US/MFCJH_Jobs";
+    const fetchImpl = fixtureFetch({
+      "https://acme.example/": '<a href="/careers">Careers</a>',
+      // The hub's only Workday link is the login form, exactly like
+      // careers.manulife.com's only link to manulife.wd3.myworkdayjobs.com.
+      "https://acme.example/careers": `<a href="${loginUrl}">Applicant Sign In</a>`,
+      [rootUrl]: "<h1>Search Jobs</h1>",
+    });
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl,
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: rootUrl,
+    });
+    expect(
+      vi.mocked(fetchImpl).mock.calls.map(([url]) => String(url)),
+    ).not.toContain(loginUrl);
+  });
+
+  it("prefers a supported ATS found later in the hub's links over an earlier unsupported-ATS-host fallback", async () => {
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        // Workday (unsupported, scores higher) appears before Lever
+        // (supported) among the hub's links.
+        "https://acme.example/careers":
+          '<a href="https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs">Careers</a>' +
+          '<a href="https://jobs.lever.co/acme">Team</a>',
+        "https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs":
+          "<h1>Search Jobs</h1>",
+        "https://jobs.lever.co/acme": "<h1>Open Roles</h1>",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ats",
+      provider: "Lever",
+      board: "acme",
+      careersUrl: "https://jobs.lever.co/acme",
+    });
+  });
 });
 
 describe("adaptive careers connector edge cases", () => {
