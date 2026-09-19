@@ -67,20 +67,8 @@ export function extractAnchors(html: string, base: URL) {
  * Links whose text or path reads like a careers destination. Blog posts about
  * jobs score lower than a `/careers` path; third-party hosts are excluded
  * unless they are a recognised ATS.
- *
- * `atsBonus` weights a non-same-domain (i.e. recognised-ATS-host) link. The
- * default keeps it a mild tiebreaker; a caller that is navigating toward an
- * ATS it has already detected (but does not support) passes a much larger
- * value so that host wins over same-domain marketing copy outright, instead
- * of by a couple of points that a well-worded "Careers" link can erase.
  */
-export function scoreCareersLinks(
-  html: string,
-  base: URL,
-  domain: string,
-  options: { atsBonus?: number } = {},
-) {
-  const atsBonus = options.atsBonus ?? 2;
+export function scoreCareersLinks(html: string, base: URL, domain: string) {
   const scored = new Map<string, { url: URL; score: number }>();
   for (const { href, text } of extractAnchors(html, base)) {
     const sameDomain = registrableDomain(href.hostname) === domain;
@@ -98,7 +86,7 @@ export function scoreCareersLinks(
       else if (path.includes(term.replace(/ /g, "-"))) score += 1;
     }
     if (/\/blog\//.test(path) || /\/news\//.test(path)) score -= 4;
-    if (!sameDomain) score += atsBonus; // an ATS link is a strong signal
+    if (!sameDomain) score += 2; // an ATS link is a strong signal
     if (score <= 0) continue;
     const key = href.href;
     const existing = scored.get(key);

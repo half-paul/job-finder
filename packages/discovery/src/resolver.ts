@@ -9,20 +9,16 @@ import {
   type PolicyCheck,
   type SupportedAts,
 } from "@jobfinder/shared";
-import { detectAts, type AtsDetection } from "./ats";
-import { atsHostPattern, findCareersPage, scoreCareersLinks } from "./careers";
+import { detectAts } from "./ats";
+import { findCareersPage, scoreCareersLinks } from "./careers";
 import { buildPatternSpec, validatePattern } from "./patterns";
+import { RobotsBlockedError } from "./robots";
 import { registrableDomain } from "./seed-list";
 import {
   discoveryFetch,
   RobotsCache,
   type DiscoveryFetchResult,
 } from "./transport";
-
-// Once we know which (unsupported) ATS a hub is pointing at, a link to that
-// vendor's host is no longer just "a strong signal" among several -- it is
-// the destination. Outweigh anything same-domain marketing copy can score.
-const DECISIVE_ATS_BONUS = 1000;
 
 // Never adopt an auth or application endpoint as the resolved careers page:
 // it is worse than the marketing page it would replace (nothing to read,
@@ -42,6 +38,16 @@ function workdayBoardRoot(url: URL): URL | null {
   const match = workdayLoginPath.exec(url.pathname);
   return match ? new URL(match[1], url) : null;
 }
+
+/**
+ * Whether a bare candidate URL (no page content to inspect yet) belongs to
+ * the same ATS vendor we already detected. Scopes the hub walk to that
+ * vendor's host: a link to a *different* company's board -- even on a
+ * supported ATS, even one our own page links to as a partner -- is not
+ * evidence about this company and must never be followed or adopted.
+ */
+const isSameVendorHost = (url: URL, wanted: string) =>
+  detectAts({ finalUrl: url, chain: [], html: "" })?.ats === wanted;
 
 export interface DiscoveryOptions extends TransportOptions {
   onProgress?: (stage: string, message: string) => Promise<void>;
@@ -121,52 +127,69 @@ export async function resolveCompanyWebsite(
       ...page.chain,
       page.finalUrl.href,
     ]);
-    const links = scoreCareersLinks(
-      page.text,
-      page.finalUrl,
-      registrableDomain(page.finalUrl.hostname)!,
-      unsupportedDetection ? { atsBonus: DECISIVE_ATS_BONUS } : undefined,
-    )
-      .filter((link) => !visited.has(link.url.href))
-      .slice(0, 3);
-    // A page on a recognised-but-unsupported ATS host is a lesser outcome
-    // than a supported hit: keep it in reserve while the remaining
-    // candidates are checked, in case one of them is actually supported.
-    let atsHostFallback: {
-      page: DiscoveryFetchResult;
-      detection: AtsDetection | null;
-    } | null = null;
-    for (const link of links) {
-      // The candidate's own path, not the eventual redirect target: we
-      // should not even fetch a link that presents itself as a login form.
-      // Workday's is the one shape narrow enough to cheaply rewrite to its
-      // board root instead of discarding outright (see `workdayBoardRoot`).
-      let target = link.url;
-      if (isAuthPath(link.url.pathname)) {
-        const root = workdayBoardRoot(link.url);
-        if (!root) continue;
-        target = root;
-      }
-      const linked = await discoveryFetch(target, fetchOptions);
-      if (linked.status !== 200) continue;
-      const linkedDetection = detectAts({
-        finalUrl: linked.finalUrl,
-        chain: linked.chain,
-        html: linked.text,
-      });
-      if (linkedDetection && isSupportedAts(linkedDetection.ats)) {
+    const domain = registrableDomain(page.finalUrl.hostname)!;
+    if (unsupportedDetection) {
+      // We already know which ATS to look for, so only follow links that
+      // resolve to THAT vendor's host (see `isSameVendorHost`). This is what
+      // keeps a partner's or rival's board -- linked from the same hub, even
+      // on a supported ATS -- from ever becoming a candidate at all.
+      const candidates = scoreCareersLinks(page.text, page.finalUrl, domain)
+        .filter((link) => !visited.has(link.url.href))
+        .filter((link) => isSameVendorHost(link.url, unsupportedDetection.ats))
+        .slice(0, 3);
+      for (const link of candidates) {
+        // The candidate's own path, not the eventual redirect target: do
+        // not even fetch a link that presents itself as a login form,
+        // except Workday's narrow, verified rewrite to its board root.
+        let target = link.url;
+        if (isAuthPath(link.url.pathname)) {
+          const root = workdayBoardRoot(link.url);
+          if (!root) continue;
+          target = root;
+        }
+        if (visited.has(target.href)) continue;
+        let linked: DiscoveryFetchResult;
+        try {
+          linked = await discoveryFetch(target, fetchOptions);
+        } catch (error) {
+          // A candidate we are merely exploring should not sink the whole
+          // resolution the way a block on the company's own page would;
+          // just move on to the next one.
+          if (error instanceof RobotsBlockedError) continue;
+          throw error;
+        }
+        if (linked.status !== 200) continue;
+        const linkedDetection = detectAts({
+          finalUrl: linked.finalUrl,
+          chain: linked.chain,
+          html: linked.text,
+        });
+        // Every candidate here already matches the detected (unsupported)
+        // vendor, so this can never turn out to be a *supported* ATS: the
+        // first reachable page on that vendor's host is the best available.
         page = linked;
-        detection = linkedDetection;
-        atsHostFallback = null;
+        detection = linkedDetection ?? detection;
         break;
       }
-      if (!atsHostFallback && atsHostPattern.test(linked.finalUrl.hostname)) {
-        atsHostFallback = { page: linked, detection: linkedDetection };
+    } else {
+      // Nothing detected at all: unchanged from before this fix.
+      const links = scoreCareersLinks(page.text, page.finalUrl, domain)
+        .filter((link) => !visited.has(link.url.href))
+        .slice(0, 3);
+      for (const link of links) {
+        const linked = await discoveryFetch(link.url, fetchOptions);
+        if (linked.status !== 200) continue;
+        const linkedDetection = detectAts({
+          finalUrl: linked.finalUrl,
+          chain: linked.chain,
+          html: linked.text,
+        });
+        if (linkedDetection && isSupportedAts(linkedDetection.ats)) {
+          page = linked;
+          detection = linkedDetection;
+          break;
+        }
       }
-    }
-    if (atsHostFallback) {
-      page = atsHostFallback.page;
-      detection = atsHostFallback.detection;
     }
   }
   const policy = await robots.assertAllowed(page.finalUrl);

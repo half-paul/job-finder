@@ -476,12 +476,16 @@ describe("resolver edge cases", () => {
     ).not.toContain(loginUrl);
   });
 
-  it("prefers a supported ATS found later in the hub's links over an earlier unsupported-ATS-host fallback", async () => {
+  // Round 1 shipped this test expecting the Lever link to win because it is
+  // supported. Review found that was the same mechanism as the RivalCo
+  // hijack below: a differently-vendored link, reachable from the same hub,
+  // getting adopted on no evidence it belongs to this company. Once an
+  // unsupported ATS is detected, the walk is scoped to *that* vendor's host
+  // only, so the Lever link here is never even a candidate.
+  it("does not follow a differently-vendored ATS link just because it is supported", async () => {
     const resolution = await resolveCompanyWebsite("https://acme.example/", {
       fetchImpl: fixtureFetch({
         "https://acme.example/": '<a href="/careers">Careers</a>',
-        // Workday (unsupported, scores higher) appears before Lever
-        // (supported) among the hub's links.
         "https://acme.example/careers":
           '<a href="https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs">Careers</a>' +
           '<a href="https://jobs.lever.co/acme">Team</a>',
@@ -491,10 +495,67 @@ describe("resolver edge cases", () => {
       }),
     });
     expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs",
+    });
+  });
+
+  it("does not hijack a partner's board: an unsupported detection must not make an unrelated, differently-vendored ATS link adoptable", async () => {
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        // Workday is detected via a script src (unsupported); the only
+        // other lead on the page is a footer link to a partner's own,
+        // supported Greenhouse board. That board must never be adopted as
+        // this company's.
+        "https://acme.example/careers":
+          '<script src="https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs"></script>' +
+          '<a href="https://boards.greenhouse.io/rivalco">Careers at our partner RivalCo</a>',
+        "https://boards.greenhouse.io/rivalco": "<h1>RivalCo openings</h1>",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
+    });
+    expect(resolution.careersUrl).not.toContain("greenhouse.io");
+  });
+
+  it("still resolves a same-domain /apply careers link when nothing is detected (unchanged from base)", async () => {
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers": '<a href="/apply">Open positions</a>',
+        "https://acme.example/apply":
+          '<a href="https://jobs.lever.co/acme">Open roles</a>',
+      }),
+    });
+    expect(resolution).toMatchObject({
       strategy: "ats",
       provider: "Lever",
       board: "acme",
-      careersUrl: "https://jobs.lever.co/acme",
+      careersUrl: "https://acme.example/apply",
+    });
+  });
+
+  it("skips a robots-blocked candidate link instead of failing the whole resolution", async () => {
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        // Workday is detected directly on this link; robots.txt on that
+        // host disallows the only path we would have followed.
+        "https://acme.example/careers":
+          '<a href="https://acme.wd7.myworkdayjobs.com/en-US/Careers">Browse jobs</a>',
+        "https://acme.wd7.myworkdayjobs.com/robots.txt":
+          "User-agent: *\nDisallow: /en-US/Careers",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
     });
   });
 });
