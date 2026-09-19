@@ -9,10 +9,9 @@ import {
   type PolicyCheck,
   type SupportedAts,
 } from "@jobfinder/shared";
-import { detectAts } from "./ats";
+import { detectAts, type AtsDetection } from "./ats";
 import { findCareersPage, scoreCareersLinks } from "./careers";
 import { buildPatternSpec, validatePattern } from "./patterns";
-import { RobotsBlockedError } from "./robots";
 import { registrableDomain } from "./seed-list";
 import {
   discoveryFetch,
@@ -40,14 +39,19 @@ function workdayBoardRoot(url: URL): URL | null {
 }
 
 /**
- * Whether a bare candidate URL (no page content to inspect yet) belongs to
- * the same ATS vendor we already detected. Scopes the hub walk to that
- * vendor's host: a link to a *different* company's board -- even on a
- * supported ATS, even one our own page links to as a partner -- is not
- * evidence about this company and must never be followed or adopted.
+ * Whether a bare URL (no page content to inspect) resolves to the same
+ * *board* we already detected -- vendor AND tenant key, not vendor alone.
+ * Two different companies' boards on the same ATS (two Workday tenants, for
+ * instance) are different hosts with different keys; comparing the vendor
+ * alone would let a partner's, rival's, or acquirer's board on that same
+ * vendor be mistaken for this company's. Used both as a cheap pre-fetch
+ * filter (on the candidate link itself) and, more importantly, as the
+ * post-fetch gate applied to every redirect hop the candidate actually took.
  */
-const isSameVendorHost = (url: URL, wanted: string) =>
-  detectAts({ finalUrl: url, chain: [], html: "" })?.ats === wanted;
+const isSameBoard = (url: URL, wanted: AtsDetection): boolean => {
+  const found = detectAts({ finalUrl: url, chain: [], html: "" });
+  return found?.ats === wanted.ats && found.key === wanted.key;
+};
 
 export interface DiscoveryOptions extends TransportOptions {
   onProgress?: (stage: string, message: string) => Promise<void>;
@@ -129,13 +133,14 @@ export async function resolveCompanyWebsite(
     ]);
     const domain = registrableDomain(page.finalUrl.hostname)!;
     if (unsupportedDetection) {
-      // We already know which ATS to look for, so only follow links that
-      // resolve to THAT vendor's host (see `isSameVendorHost`). This is what
-      // keeps a partner's or rival's board -- linked from the same hub, even
-      // on a supported ATS -- from ever becoming a candidate at all.
+      // We already know which board to look for, so only follow links that
+      // resolve to it (see `isSameBoard`). This is what keeps a partner's,
+      // rival's, or acquirer's board -- even a *different tenant on the
+      // same ATS*, even one our own page links to -- from ever becoming a
+      // candidate at all.
       const candidates = scoreCareersLinks(page.text, page.finalUrl, domain)
         .filter((link) => !visited.has(link.url.href))
-        .filter((link) => isSameVendorHost(link.url, unsupportedDetection.ats))
+        .filter((link) => isSameBoard(link.url, unsupportedDetection))
         .slice(0, 3);
       for (const link of candidates) {
         // The candidate's own path, not the eventual redirect target: do
@@ -151,22 +156,39 @@ export async function resolveCompanyWebsite(
         let linked: DiscoveryFetchResult;
         try {
           linked = await discoveryFetch(target, fetchOptions);
-        } catch (error) {
-          // A candidate we are merely exploring should not sink the whole
-          // resolution the way a block on the company's own page would;
-          // just move on to the next one.
-          if (error instanceof RobotsBlockedError) continue;
-          throw error;
+        } catch {
+          // Probing a speculative candidate must never leave the company
+          // worse off than not probing it at all. An unverifiable
+          // robots.txt, a robots block, a timeout, a malformed response --
+          // any of it just rules out this one candidate, not the whole
+          // resolution. A blanket catch is safe *only* here: the page we
+          // actually adopt still gets its own robots re-asserted right
+          // after this loop (`robots.assertAllowed(page.finalUrl)` below),
+          // and `discoveryFetch` asserts robots on every hop of whichever
+          // page that turns out to be. Nothing this loop merely explores
+          // and discards ever gets a pass on robots.
+          continue;
         }
         if (linked.status !== 200) continue;
+        // The pre-fetch check above was cheap and approximate (URL only);
+        // this is the one that actually has to hold, checked against every
+        // hop the candidate really took -- a same-board link that redirects
+        // off-board (an acquired tenant forwarding to its acquirer, say)
+        // must not survive just because it started on the right host.
+        if (
+          !linked.chain.every((hop) =>
+            isSameBoard(new URL(hop), unsupportedDetection),
+          )
+        )
+          continue;
         const linkedDetection = detectAts({
           finalUrl: linked.finalUrl,
           chain: linked.chain,
           html: linked.text,
         });
         // Every candidate here already matches the detected (unsupported)
-        // vendor, so this can never turn out to be a *supported* ATS: the
-        // first reachable page on that vendor's host is the best available.
+        // board, so this can never turn out to be a *supported* ATS: the
+        // first reachable page on that board is the best available.
         page = linked;
         detection = linkedDetection ?? detection;
         break;

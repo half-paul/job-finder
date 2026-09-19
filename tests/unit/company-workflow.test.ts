@@ -558,6 +558,73 @@ describe("resolver edge cases", () => {
       careersUrl: "https://acme.example/careers",
     });
   });
+
+  it("does not adopt a same-vendor board belonging to a different tenant", async () => {
+    // Same vendor as detected (Workday), but "rivalco" is a different
+    // tenant key than "acme" -- matching on vendor alone would adopt it.
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers":
+          '<script src="https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs"></script>' +
+          '<a href="https://rivalco.wd1.myworkdayjobs.com/en-US/Careers">Careers at our partner RivalCo</a>',
+        "https://rivalco.wd1.myworkdayjobs.com/en-US/Careers":
+          "<h1>RivalCo openings</h1>",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
+    });
+    expect(resolution.careersUrl).not.toContain("rivalco");
+  });
+
+  it("does not adopt a same-board candidate that redirects off-board", async () => {
+    // The link starts on acme's own Workday board, but 302s away to a
+    // different vendor and tenant entirely (an acquired tenant forwarding
+    // to its acquirer's board, say). The pre-fetch host matched; the actual
+    // destination must still be checked.
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers":
+          '<script src="https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs"></script>' +
+          '<a href="https://acme.wd5.myworkdayjobs.com/en-US/Careers">Browse jobs</a>',
+        "https://acme.wd5.myworkdayjobs.com/en-US/Careers": new Response(null, {
+          status: 302,
+          headers: { location: "https://boards.greenhouse.io/rivalco" },
+        }),
+        "https://boards.greenhouse.io/rivalco": "<h1>RivalCo openings</h1>",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
+    });
+    expect(resolution.careersUrl).not.toContain("greenhouse");
+  });
+
+  it("skips a candidate whose robots.txt cannot be verified, and still resolves", async () => {
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers":
+          '<a href="https://acme.wd5.myworkdayjobs.com/en-US/Careers">Browse jobs</a>',
+        // Not a robots block -- an unverifiable policy (HTTP 500). Probing
+        // this candidate must not cost the company its resolution.
+        "https://acme.wd5.myworkdayjobs.com/robots.txt": new Response("", {
+          status: 500,
+        }),
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
+    });
+  });
 });
 
 describe("adaptive careers connector edge cases", () => {
