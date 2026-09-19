@@ -427,6 +427,232 @@ describe("resolver edge cases", () => {
     });
     expect(resolution).toMatchObject({ strategy: "ai", ats: "Workday" });
   });
+
+  it("never adopts a login-shaped candidate, even one that outscores the real board link", async () => {
+    const fetchImpl = fixtureFetch({
+      "https://acme.example/": '<a href="/careers">Careers</a>',
+      // "Careers Sign In" outscores "Browse Jobs" on text alone; the login
+      // path must still be skipped rather than adopted. iCIMS has no
+      // Workday-shaped board root to rewrite to, so this is a plain skip.
+      "https://acme.example/careers":
+        '<a href="https://acme.icims.com/jobs/login">Careers Sign In</a>' +
+        '<a href="https://acme.icims.com/jobs/search">Browse Jobs</a>',
+      "https://acme.icims.com/jobs/search": "<h1>Open roles</h1>",
+    });
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl,
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "iCIMS",
+      careersUrl: "https://acme.icims.com/jobs/search",
+    });
+    expect(
+      vi.mocked(fetchImpl).mock.calls.map(([url]) => String(url)),
+    ).not.toContain("https://acme.icims.com/jobs/login");
+  });
+
+  it("rewrites a Workday login link to its board root and adopts that page (the manulife.com case)", async () => {
+    const loginUrl =
+      "https://acme.wd3.myworkdayjobs.com/en-US/MFCJH_Jobs/login";
+    const rootUrl = "https://acme.wd3.myworkdayjobs.com/en-US/MFCJH_Jobs";
+    const fetchImpl = fixtureFetch({
+      "https://acme.example/": '<a href="/careers">Careers</a>',
+      // The hub's only Workday link is the login form, exactly like
+      // careers.manulife.com's only link to manulife.wd3.myworkdayjobs.com.
+      "https://acme.example/careers": `<a href="${loginUrl}">Applicant Sign In</a>`,
+      [rootUrl]: "<h1>Search Jobs</h1>",
+    });
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl,
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: rootUrl,
+    });
+    expect(
+      vi.mocked(fetchImpl).mock.calls.map(([url]) => String(url)),
+    ).not.toContain(loginUrl);
+  });
+
+  // Round 1 shipped this test expecting the Lever link to win because it is
+  // supported. Review found that was the same mechanism as the RivalCo
+  // hijack below: a differently-vendored link, reachable from the same hub,
+  // getting adopted on no evidence it belongs to this company. Once an
+  // unsupported ATS is detected, the walk is scoped to *that* vendor's host
+  // only, so the Lever link here is never even a candidate.
+  it("does not follow a differently-vendored ATS link just because it is supported", async () => {
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers":
+          '<a href="https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs">Careers</a>' +
+          '<a href="https://jobs.lever.co/acme">Team</a>',
+        "https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs":
+          "<h1>Search Jobs</h1>",
+        "https://jobs.lever.co/acme": "<h1>Open Roles</h1>",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs",
+    });
+  });
+
+  it("does not hijack a partner's board: an unsupported detection must not make an unrelated, differently-vendored ATS link adoptable", async () => {
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        // Workday is detected via a script src (unsupported); the only
+        // other lead on the page is a footer link to a partner's own,
+        // supported Greenhouse board. That board must never be adopted as
+        // this company's.
+        "https://acme.example/careers":
+          '<script src="https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs"></script>' +
+          '<a href="https://boards.greenhouse.io/rivalco">Careers at our partner RivalCo</a>',
+        "https://boards.greenhouse.io/rivalco": "<h1>RivalCo openings</h1>",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
+    });
+    expect(resolution.careersUrl).not.toContain("greenhouse.io");
+  });
+
+  it("still resolves a same-domain /apply careers link when nothing is detected (unchanged from base)", async () => {
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers": '<a href="/apply">Open positions</a>',
+        "https://acme.example/apply":
+          '<a href="https://jobs.lever.co/acme">Open roles</a>',
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ats",
+      provider: "Lever",
+      board: "acme",
+      careersUrl: "https://acme.example/apply",
+    });
+  });
+
+  it("skips a robots-blocked candidate link instead of failing the whole resolution", async () => {
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        // Workday is detected directly on this link; robots.txt on that
+        // host disallows the only path we would have followed.
+        "https://acme.example/careers":
+          '<a href="https://acme.wd7.myworkdayjobs.com/en-US/Careers">Browse jobs</a>',
+        "https://acme.wd7.myworkdayjobs.com/robots.txt":
+          "User-agent: *\nDisallow: /en-US/Careers",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
+    });
+  });
+
+  it("does not adopt a same-vendor board belonging to a different tenant", async () => {
+    // Same vendor as detected (Workday), but "rivalco" is a different
+    // tenant key than "acme" -- matching on vendor alone would adopt it.
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers":
+          '<script src="https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs"></script>' +
+          '<a href="https://rivalco.wd1.myworkdayjobs.com/en-US/Careers">Careers at our partner RivalCo</a>',
+        "https://rivalco.wd1.myworkdayjobs.com/en-US/Careers":
+          "<h1>RivalCo openings</h1>",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
+    });
+    expect(resolution.careersUrl).not.toContain("rivalco");
+  });
+
+  it("does not adopt a same-board candidate that redirects off-board", async () => {
+    // The link starts on acme's own Workday board, but 302s away to a
+    // different vendor and tenant entirely (an acquired tenant forwarding
+    // to its acquirer's board, say). The pre-fetch host matched; the actual
+    // destination must still be checked.
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers":
+          '<script src="https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs"></script>' +
+          '<a href="https://acme.wd5.myworkdayjobs.com/en-US/Careers">Browse jobs</a>',
+        "https://acme.wd5.myworkdayjobs.com/en-US/Careers": new Response(null, {
+          status: 302,
+          headers: { location: "https://boards.greenhouse.io/rivalco" },
+        }),
+        "https://boards.greenhouse.io/rivalco": "<h1>RivalCo openings</h1>",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
+    });
+    expect(resolution.careersUrl).not.toContain("greenhouse");
+  });
+
+  it("does not adopt a same-board candidate that redirects to its own login page", async () => {
+    // Same board throughout (the redirect never leaves acme's Workday
+    // tenant), so the board-identity check alone would let this through.
+    // Unauthenticated Workday board roots commonly bounce to /login; that
+    // landing spot must still be rejected as an auth endpoint.
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers":
+          '<script src="https://acme.wd5.myworkdayjobs.com/en-US/MFCJH_Jobs"></script>' +
+          '<a href="https://acme.wd5.myworkdayjobs.com/en-US/Careers">Browse jobs</a>',
+        "https://acme.wd5.myworkdayjobs.com/en-US/Careers": new Response(null, {
+          status: 302,
+          headers: {
+            location: "https://acme.wd5.myworkdayjobs.com/en-US/Careers/login",
+          },
+        }),
+        "https://acme.wd5.myworkdayjobs.com/en-US/Careers/login":
+          "<h1>Sign in</h1>",
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
+    });
+  });
+
+  it("skips a candidate whose robots.txt cannot be verified, and still resolves", async () => {
+    const resolution = await resolveCompanyWebsite("https://acme.example/", {
+      fetchImpl: fixtureFetch({
+        "https://acme.example/": '<a href="/careers">Careers</a>',
+        "https://acme.example/careers":
+          '<a href="https://acme.wd5.myworkdayjobs.com/en-US/Careers">Browse jobs</a>',
+        // Not a robots block -- an unverifiable policy (HTTP 500). Probing
+        // this candidate must not cost the company its resolution.
+        "https://acme.wd5.myworkdayjobs.com/robots.txt": new Response("", {
+          status: 500,
+        }),
+      }),
+    });
+    expect(resolution).toMatchObject({
+      strategy: "ai",
+      ats: "Workday",
+      careersUrl: "https://acme.example/careers",
+    });
+  });
 });
 
 describe("adaptive careers connector edge cases", () => {
